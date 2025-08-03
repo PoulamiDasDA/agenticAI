@@ -1,0 +1,16 @@
+Title: Human Activity Seen from Space at Night
+
+Artificial illumination visible from orbit provides a unique lens to study human presence and development.
+Major metropolitan areas such as New York, Paris, and Tokyo emit powerful light signatures that can be seen clearly from orbit.
+Conversely, areas like North Korea appear almost dark compared to neighboring regions, reflecting differences in infrastructure
+and energy availability.
+
+Light intensity and expansion patterns help researchers identify urban sprawl, deforestation, and electrification trends.
+Monitoring lights also plays a role in humanitarian efforts. For example, changes in nighttime brightness have been used
+to assess refugee camp populations or damage after natural disasters like earthquakes and hurricanes.
+
+Q: How does night imagery help humanitarian efforts?
+A: Satellite-detected changes in light patterns help estimate populations, monitor disaster zones, and evaluate reconstruction progress.
+
+Q: Why is North Korea darker than South Korea at night?
+A: Due to limited infrastructure and electricity availability, North Korea has significantly less artificial lighting than its southern neighbor.

@@ -1,0 +1,18 @@
+Title: Nighttime Imagery in Climate and Disaster Monitoring
+
+Satellite-based nighttime observations are increasingly important in climate science and emergency response.
+During power outages caused by hurricanes, floods, or earthquakes, a sudden drop in light levels can help
+authorities identify the hardest-hit areas even when other communications are down.
+
+In wildfire-prone areas like California or Australia, nighttime satellite images can detect active fires via thermal signatures,
+tracking their spread through smoke and darkness. These technologies support quicker deployment of emergency services and
+improve early-warning systems.
+
+Climate researchers also study nighttime heat retention in urban environments, known as the "urban heat island" effect.
+Cities often remain warmer overnight than rural areas, increasing energy demand for cooling and affecting public health.
+
+Q: How does night imagery support disaster response?
+A: It identifies blackout zones, detects fire outbreaks, and helps guide emergency operations when ground access is limited.
+
+Q: What is the urban heat island effect?
+A: It's the tendency for cities to retain more heat overnight compared to rural areas due to concrete and reduced vegetation.
