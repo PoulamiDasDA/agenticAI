@@ -304,15 +304,16 @@ Container: data/
 
 ## MI Permission summary
 
-Storage Account:
-├── Storage Blob Data Contributor
-├── Storage Queue Data Contributor
-├── Storage Table Data Contributor
-└── Storage Account Contributor
+- Storage Account
+  - Storage Blob Data Contributor
+  - Storage Queue Data Contributor
+  - Storage Table Data Contributor
+  - Storage Account Contributor
 
-Application Insights:
-├── Monitoring Metrics Publisher
-└── Application Insights Component Contributor
+- Application Insights
+  - Monitoring Metrics Publisher
+  - Application Insights Component Contributor
 
-Key Vault (optional):
-└── Key Vault Secrets User
+- Key Vault (optional)
+  - Key Vault Secrets
+
