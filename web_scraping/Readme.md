@@ -47,6 +47,7 @@ When deploying the Function App, the following access levels were assigned to th
   "storage_account": "explorationstorage12",
   "mode": "durable_functions"
 }
+```
 
 #### curl example
 
