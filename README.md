@@ -189,14 +189,14 @@ curl -X GET "https://your-function-app.azurewebsites.net/api/scraper/status/abc1
 
 #### Schedule format
 
-0 0 9 * * *
+0 0 9 1 * *
 │ │ │ │ │ │
-│ │ │ │ │ └─── Day of week (0-6, Sunday=0)
-│ │ │ │ └───── Month (1-12)
-│ │ │ └─────── Day of month (1-31)
-│ │ └───────── Hour (0-23)
-│ └─────────── Minute (0-59)
-└───────────── Second (0-59)
+│ │ │ │ │ └─── Day of week (0-6, Sunday=0) - * means any day
+│ │ │ │ └───── Month (1-12) - * means every month
+│ │ │ └─────── Day of month (1-31) - 1 means first day of month
+│ │ └───────── Hour (0-23) - 9 means 9 AM
+│ └─────────── Minute (0-59) - 0 means at the top of the hour
+└───────────── Second (0-59) - 0 means at the start of the minute
 
 🎯 Orchestrator Function (Internal)
 ### 5. Scraping Orchestrator
