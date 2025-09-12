@@ -54,16 +54,16 @@ When deploying the Function App, the following access levels were assigned to th
 curl -X GET "https://your-function-app.azurewebsites.net/api/health"
 
 ### 2. Web Scraping Endpoint
-Route: /api/scraper
-Method: POST
-Authentication: Function key required
-Purpose: Start comprehensive web scraping workflows
+- **Route**: /api/scraper
+- **Method**: POST
+- **Authentication**: Function key required
+- **Purpose**: Start comprehensive web scraping workflows
 Functionality
-✅ Initiates durable function orchestration
-✅ Validates website availability
-✅ Starts full scraping workflow (discovery → scraping → processing → upload)
-✅ Optional file download integration (PDFs, Word docs)
-✅ Returns instance ID for tracking progress
+- ✅ Initiates durable function orchestration
+- ✅ Validates website availability
+- ✅ Starts full scraping workflow (discovery → scraping → processing → upload)
+- ✅ Optional file download integration (PDFs, Word docs)
+- ✅ Returns instance ID for tracking progress
 
 ##### Request Parameters
 ```json
@@ -89,7 +89,7 @@ Functionality
 
 #### curl example
 
-```
+```json
 curl -X POST "https://your-function-app.azurewebsites.net/api/scraper?code=YOUR_FUNCTION_KEY" \
      -H "Content-Type: application/json" \
      -d '{
@@ -101,16 +101,16 @@ curl -X POST "https://your-function-app.azurewebsites.net/api/scraper?code=YOUR_
 ```
 
 ### 3. Status Monitoring Endpoint
-Route: /api/scraper/status/{instance_id}
-Method: GET
-Authentication: Function key required
-Purpose: Real-time workflow progress monitoring
-Functionality
-✅ Tracks orchestration execution status
-✅ Shows current workflow step
-✅ Displays completed phases
-✅ Provides detailed progress data
-✅ Shows intermediate results from each phase
+- **Route**: /api/scraper/status/{instance_id}
+- **Method**: GET
+- **Authentication**: Function key required
+- **Purpose**: Real-time workflow progress monitoring
+#### Functionality
+- ✅ Tracks orchestration execution status
+- ✅ Shows current workflow step
+- ✅ Displays completed phases
+- ✅ Provides detailed progress data
+- ✅ Shows intermediate results from each phase
 
 #### Response during execution
 ```json
@@ -174,18 +174,18 @@ curl -X GET "https://your-function-app.azurewebsites.net/api/scraper/status/abc1
 
 ⏰ Timer Trigger Function (Automated)
 ### 4. Scheduled Scraper
-Schedule: 0 0 9 * * * (Daily at 9:00 AM UTC)
-Authentication: None (internal trigger)
-Purpose: Automated daily scraping execution
-Functionality
-✅ Runs automatically without manual intervention
-✅ Uses environment variables for configuration
-✅ Starts full scraping workflow for configured website
-✅ Handles past-due execution detection
-✅ Comprehensive error logging for monitoring
-Environment Variables
-SCRAPING_WEBSITE: Target website (default: "cbuae")
-SCRAPING_UPLOAD_TO_CLOUD: Upload behavior (default: "true")
+- **Schedule**: 0 0 9 * * * (Daily at 9:00 AM UTC)
+- **Authentication**: None (internal trigger)
+- **Purpose**: Automated daily scraping execution
+#### Functionality
+- ✅ Runs automatically without manual intervention
+- ✅ Uses environment variables for configuration
+- ✅ Starts full scraping workflow for configured website
+- ✅ Handles past-due execution detection
+- ✅ Comprehensive error logging for monitoring
+#### Environment Variables
+- **SCRAPING_WEBSITE**: Target website (default: "cbuae")
+- **SCRAPING_UPLOAD_TO_CLOUD**: Upload behavior (default: "true")
 
 #### Schedule format
 
@@ -200,82 +200,82 @@ SCRAPING_UPLOAD_TO_CLOUD: Upload behavior (default: "true")
 
 🎯 Orchestrator Function (Internal)
 ### 5. Scraping Orchestrator
-Type: Durable Function Orchestrator
-Purpose: Workflow coordination and state management
-Functionality
-✅ Manages entire scraping workflow lifecycle
-✅ Coordinates activity function execution
-✅ Handles error recovery and retry logic
-✅ Maintains workflow state across executions
-✅ Provides real-time status updates
-✅ Ensures data consistency and transaction integrity
-Workflow Steps
-Discovery: Website structure analysis and URL extraction
-Scraping: Content extraction and file downloads
-Processing: Data transformation and file creation
-Upload: Azure Storage persistence
+- **Type**: Durable Function Orchestrator
+- **Purpose**: Workflow coordination and state management
+#### Functionality
+- ✅ Manages entire scraping workflow lifecycle
+- ✅ Coordinates activity function execution
+- ✅ Handles error recovery and retry logic
+- ✅ Maintains workflow state across executions
+- ✅ Provides real-time status updates
+- ✅ Ensures data consistency and transaction integrity
+#### Workflow Steps
+- **Discovery**: Website structure analysis and URL extraction
+- **Scraping**: Content extraction and file downloads
+- **Processing**: Data transformation and file creation
+- **Upload**: Azure Storage persistence
 
-Error Handling
-Individual activity failures don't stop the entire workflow
-Comprehensive error logging and status reporting
-Graceful degradation for partial failures
-Structured error responses with detailed failure information
+#### Error Handling
+- Individual activity failures don't stop the entire workflow
+- Comprehensive error logging and status reporting
+- Graceful degradation for partial failures
+- Structured error responses with detailed failure information
 
 ⚡ Activity Functions (Internal Workers)
 ### 6. Website Discovery Activity
-Purpose: Website structure analysis and URL discovery
+#### Purpose: Website structure analysis and URL discovery
 
-Functionality
-✅ Hierarchical site structure discovery
-✅ URL extraction with depth-based crawling
-✅ Site-type detection (specialized vs generic)
-✅ URL filtering (excludes unwanted content)
-✅ Metadata extraction (titles, structure)
-Discovery Methods
-Specialized Sites: Hierarchical skeleton discovery for structured websites
-Generic Sites: Basic skeleton discovery for general websites
-Depth Control: Configurable maximum crawling depth
-Filter Rules: Automatic exclusion of unwanted content (e.g., insurance pages)
+#### Functionality
+- ✅ Hierarchical site structure discovery
+- ✅ URL extraction with depth-based crawling
+- ✅ Site-type detection (specialized vs generic)
+- ✅ URL filtering (excludes unwanted content)
+- ✅ Metadata extraction (titles, structure)
+#### Discovery Methods
+- **Specialized Sites**: Hierarchical skeleton discovery for structured websites
+- **Generic Sites**: Basic skeleton discovery for general websites
+- **Depth Control**: Configurable maximum crawling depth
+- **Filter Rules**: Automatic exclusion of unwanted content (e.g., insurance pages)
 
 ### 7. Content Scraping Activity
-Purpose: Content extraction and file downloads
+- **Purpose**: Content extraction and file downloads
 
-Functionality
-✅ Text content extraction from discovered URLs
-✅ Integrated file download (PDFs, Word documents)
-✅ Rate limiting for respectful crawling
-✅ Error handling for failed pages
-✅ Progress tracking and statistics
-File Download Features
-Supported Formats: PDF (.pdf) and Word documents (.docx, .doc)
-De-duplication: SHA256 hash-based duplicate detection
-Rate Limiting: 0.5-1 second delays between requests
-Size Limits: Configurable maximum file sizes
-Timeout Handling: 15-second timeout per request
+#### Functionality
+- ✅ Text content extraction from discovered URLs
+- ✅ Integrated file download (PDFs, Word documents)
+- ✅ Rate limiting for respectful crawling
+- ✅ Error handling for failed pages
+- ✅ Progress tracking and statistics
+#### File Download Features
+- **Supported Formats**: PDF (.pdf) and Word documents (.docx, .doc)
+- **De-duplication**: SHA256 hash-based duplicate detection
+- **Rate Limiting**: 0.5-1 second delays between requests
+- **Size Limits**: Configurable maximum file sizes
+- **Timeout Handling**: 15-second timeout per request
 
 ### 8. Data Processing Activity
 Purpose: Content processing and file organization
 
-Functionality
-✅ Website-specific content processing
-✅ JSON file creation for each scraped page
-✅ Summary file generation
-✅ Temporary directory management
-✅ Data validation and quality checks
-Processing Features
-Individual Files: One JSON file per scraped page
-Summary Generation: Consolidated summary of all scraped data
-Data Validation: Content quality checks and validation
-Metadata Extraction: Title, URL, timestamp, and content structure
+#### Functionality
+- ✅ Website-specific content processing
+- ✅ JSON file creation for each scraped page
+- ✅ Summary file generation
+- ✅ Temporary directory management
+- ✅ Data validation and quality checks
+#### Processing Features
+- **Individual Files**: One JSON file per scraped page
+- **Summary Generation**: Consolidated summary of all scraped data
+- **Data Validation**: Content quality checks and validation
+- **Metadata Extraction**: Title, URL, timestamp, and content structure
 
 ### 9. Storage Upload Activity
 Purpose: Azure Storage persistence
 
-Functionality
-✅ Bulk file upload to Azure Blob Storage
-✅ Organized folder structure creation
-✅ Upload progress tracking
-✅ Error handling and retry logic
+#### Functionality
+- ✅ Bulk file upload to Azure Blob Storage
+- ✅ Organized folder structure creation
+- ✅ Upload progress tracking
+- ✅ Error handling and retry logic
 
 ## Storage organization
 
@@ -294,11 +294,11 @@ Container: data/
 │       │   └── ...
 │       └── summary_YYYYMMDD_HHMMSS.json
 
-Application Settings (Azure Portal)
-Runtime Version: Python 3.11
-Always On: Recommended for consistent performance
-HTTPS Only: Enabled for security
-Managed Identity: System-assigned identity enabled
+### Application Settings (Azure Portal)
+- **Runtime Version**: Python 3.11
+- **Always On**: Recommended for consistent performance
+- **HTTPS Only**: Enabled for security
+- **Managed Identity**: System-assigned identity enabled
 ✅ Managed identity authentication
 
 
