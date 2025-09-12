@@ -66,12 +66,14 @@ Functionality
 ✅ Returns instance ID for tracking progress
 
 ##### Request Parameters
+```json
 {
   "website": "cbuae",           // Target website
   "upload_to_cloud": true,      // Store results in Azure Storage
   "download_files": true,       // Download attachments (optional)
   "max_files": 10              // Limit file downloads (optional)
 }
+```
 
 #### Response Example
 ```json
@@ -83,9 +85,11 @@ Functionality
   "upload_to_cloud": true,
   "started_at": "2025-09-11T10:30:00.000Z"
 }
+```
 
 #### curl example
 
+```
 curl -X POST "https://your-function-app.azurewebsites.net/api/scraper?code=YOUR_FUNCTION_KEY" \
      -H "Content-Type: application/json" \
      -d '{
@@ -94,6 +98,7 @@ curl -X POST "https://your-function-app.azurewebsites.net/api/scraper?code=YOUR_
        "download_files": true,
        "max_files": 10
      }'
+```
 
 ### 3. Status Monitoring Endpoint
 Route: /api/scraper/status/{instance_id}
@@ -108,7 +113,7 @@ Functionality
 ✅ Shows intermediate results from each phase
 
 #### Response during execution
-
+```json
 {
   "instance_id": "abc123def456",
   "status": "Running",
@@ -132,9 +137,10 @@ Functionality
     }
   }
 }
+```
 
 #### Response when completed
-
+```json
 {
   "instance_id": "abc123def456",
   "status": "Completed",
@@ -160,6 +166,7 @@ Functionality
     "upload": {"total_successful": 15}
   }
 }
+```
 
 #### curl example
 
