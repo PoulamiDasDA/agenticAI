@@ -12,14 +12,11 @@ import time
 from urllib.parse import urljoin, urlparse
 from collections import deque
 import hashlib
-from azure.storage.blob import BlobServiceClient
-from azure.identity import DefaultAzureCredential
 
 # Set UTF-8 encoding for Windows
 if sys.platform.startswith('win'):
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-# Import your existing modules
 from main import WEBSITES, get_storage_account, extract_urls_from_structure
 from SimpleScraper import SimpleScraper
 from WebScrapingProcessor import create_processor
@@ -41,16 +38,18 @@ app = df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
 @app.orchestration_trigger(context_name="context")
 def scraping_orchestrator(context: df.DurableOrchestrationContext):
     """
-    Enhanced orchestrator that performs full scraping workflow including file downloads
+    Main orchestrator: loads discovery from storage OR runs discovery, then scrapes
     """
     input_data = context.get_input()
     website = input_data.get('website', 'cbuae')
-    upload_to_cloud = input_data.get('upload_to_cloud', True)
-    download_files = input_data.get('download_files', False)
-    max_files = input_data.get('max_files', 10)  # Reduced default
+    max_files = input_data.get('max_files', 100)
+    force_discovery = input_data.get('force_discovery', False)
+    
+    upload_to_cloud = True  # Always upload to Azure Storage
+    download_files = True   # Always download attachments
 
     if not context.is_replaying:
-        logger.info(f"[ORCHESTRATOR] Starting full workflow for {website} (download_files: {download_files})")
+        logger.info(f"[ORCHESTRATOR] Starting workflow for {website} (discovery from storage, force_discovery: {force_discovery})")
 
     try:
         # Initialize progress tracking
@@ -58,30 +57,57 @@ def scraping_orchestrator(context: df.DurableOrchestrationContext):
             'website': website,
             'current_step': 'starting',
             'steps_completed': [],
-            'total_steps': 4 if upload_to_cloud else 3,  # Removed separate file download step
+            'total_steps': 3,  # Load/Discover → Scraping → Finalize
             'discovery': {},
             'scraping': {},
             'processing': {},
             'upload': {}
         }
 
-        # Step 1: Discover website URLs
-        if not context.is_replaying:
-            logger.info(f"[ORCHESTRATOR] Step 1: Starting discovery for {website}")
-            progress['current_step'] = 'discovery'
-            context.set_custom_status(progress)
+        # Step 1: Try to load discovery from storage OR run new discovery
+        discovery_result = None
         
-        discovery_result = yield context.call_activity("discover_website", {
-            "website": website
-        })
+        if not force_discovery:
+            if not context.is_replaying:
+                logger.info(f"[ORCHESTRATOR] Step 1a: Loading discovery from storage for {website}")
+                progress['current_step'] = 'loading_discovery'
+                context.set_custom_status(progress)
+            
+            # Try to load existing discovery results
+            load_result = yield context.call_activity("load_discovery_results", {
+                "website": website
+            })
+            
+            if load_result.get('status') == 'success':
+                discovery_result = load_result['discovery_data']
+                progress['discovery'] = {
+                    'status': 'loaded_from_storage',
+                    'total_urls_found': len(discovery_result.get('discovered_urls', {})),
+                    'loaded_from': load_result.get('blob_path'),
+                    'loaded_at': load_result.get('loaded_at')
+                }
+                if not context.is_replaying:
+                    logger.info(f"[ORCHESTRATOR] Discovery loaded from storage: {len(discovery_result.get('discovered_urls', {}))} URLs")
         
-        progress['discovery'] = discovery_result
+        # If no discovery found or forced, run new discovery
+        if discovery_result is None or force_discovery:
+            if not context.is_replaying:
+                logger.info(f"[ORCHESTRATOR] Step 1b: Running new discovery for {website}")
+                progress['current_step'] = 'discovery'
+                context.set_custom_status(progress)
+            
+            discovery_result = yield context.call_activity("discover_website", {
+                "website": website
+            })
+            
+            progress['discovery'] = discovery_result
+        
         progress['steps_completed'].append('discovery')
         if not context.is_replaying:
-            logger.info(f"[ORCHESTRATOR] Step 1 completed: {discovery_result.get('status', 'unknown')}")
+            logger.info(f"[ORCHESTRATOR] Step 1 completed: {progress['discovery'].get('status', 'unknown')}")
             context.set_custom_status(progress)
 
-        # Step 2: Scrape content from discovered URLs (and download files if enabled)
+        # Step 2: Scrape content from discovered URLs (and download files)
         if not context.is_replaying:
             logger.info(f"[ORCHESTRATOR] Step 2: Starting scraping for {website}")
             progress['current_step'] = 'scraping'
@@ -99,79 +125,95 @@ def scraping_orchestrator(context: df.DurableOrchestrationContext):
         if not context.is_replaying:
             logger.info(f"[ORCHESTRATOR] Step 2 completed: {scraping_result.get('status', 'unknown')}")
             context.set_custom_status(progress)
-        
-        # Step 3: Process scraped data
-        if not context.is_replaying:
-            logger.info(f"[ORCHESTRATOR] Step 3: Starting processing for {website}")
-            progress['current_step'] = 'processing'
-            context.set_custom_status(progress)
-        
-        processing_result = yield context.call_activity("process_scraped_data", {
-            "website": website, 
-            "scraping_result": scraping_result
-        })
-        
-        progress['processing'] = processing_result
-        progress['steps_completed'].append('processing')
-        if not context.is_replaying:
-            logger.info(f"[ORCHESTRATOR] Step 3 completed: {processing_result.get('status', 'unknown')}")
-            context.set_custom_status(progress)
-        
-        # Step 4: Upload scraped data to storage (if enabled)
-        upload_result = {}
-        if upload_to_cloud:
-            if not context.is_replaying:
-                logger.info(f"[ORCHESTRATOR] Step 4: Starting upload for {website}")
-                progress['current_step'] = 'upload'
-                context.set_custom_status(progress)
-            
-            upload_result = yield context.call_activity("upload_to_storage", {
-                "website": website, 
-                "processing_result": processing_result
-            })
-            
-            progress['upload'] = upload_result
-            progress['steps_completed'].append('upload')
-            if not context.is_replaying:
-                logger.info(f"[ORCHESTRATOR] Step 4 completed: {upload_result.get('status', 'unknown')}")
-                context.set_custom_status(progress)
 
-        # Step 5: Download and upload files (if enabled) - REMOVED, now integrated in scraping step
+        # Step 3: Finalize results (data already uploaded during scraping)
+        if not context.is_replaying:
+            logger.info(f"[ORCHESTRATOR] Step 3: Finalizing results for {website}")
+            progress['current_step'] = 'finalizing'
+            context.set_custom_status(progress)
 
-        # Prepare final result
+        # Create final result from scraping output (data already in Azure Storage)
         final_result = {
             'website': website,
             'mode': 'full',
-            'upload_to_cloud': upload_to_cloud,
-            'download_files': download_files,
-            'discovery': discovery_result,
-            'scraping': scraping_result,
-            'processing': processing_result,
-            'upload': upload_result,
             'status': 'completed',
             'completed_at': context.current_utc_datetime.isoformat(),
-            'total_urls_discovered': discovery_result.get('total_urls_found', 0),
-            'total_pages_scraped': scraping_result.get('scraped_count', 0),
-            'total_files_processed': processing_result.get('processed_count', 0),
-            'total_files_uploaded': upload_result.get('total_successful', 0) if upload_to_cloud else 0,
-            'total_documents_downloaded': scraping_result.get('file_downloads', {}).get('total_downloaded', 0) if download_files else 0
+            'discovery': {
+                'source': progress['discovery'].get('status', 'unknown'),
+                'total_urls_found': len(discovery_result.get('discovered_urls', {})) if discovery_result else 0,
+                'discovery_uploaded': discovery_result.get('discovery_uploaded', False) if discovery_result else False,
+                'container_name': discovery_result.get('container_name') if discovery_result else None
+            },
+            'scraping': {
+                'pages_scraped': scraping_result.get('scraped_count', 0),
+                'uploaded_to_azure': scraping_result.get('uploaded_to_azure', False),
+                'uploaded_pages_count': scraping_result.get('uploaded_pages_count', 0),
+                'uploaded_files_count': scraping_result.get('uploaded_files_count', 0),
+                'container_name': scraping_result.get('container_name'),
+                'summary_blob_name': scraping_result.get('summary_blob_name')
+            }
         }
+        
+        # Add file download summary if enabled
+        if download_files:
+            final_result['file_downloads'] = scraping_result.get('file_downloads_summary', {})
+        
+        # Test for payload size limit (16KB for Azure Durable Functions)
+        try:
+            import json
+            payload_json = json.dumps(final_result, ensure_ascii=False)
+            payload_size_kb = len(payload_json.encode('utf-8')) / 1024
+            
+            if payload_size_kb > 15:  # Leave 1KB buffer
+                if not context.is_replaying:
+                    logger.warning(f"[ORCHESTRATOR] Payload size {payload_size_kb:.1f}KB exceeds safe limit, creating minimal result")
+                
+                # Create minimal result under 16KB
+                minimal_result = {
+                    'website': website,
+                    'mode': 'full',
+                    'status': 'completed',
+                    'completed_at': context.current_utc_datetime.isoformat(),
+                    'totals': {
+                        'urls_discovered': len(discovery_result.get('discovered_urls', {})) if discovery_result else 0,
+                        'pages_scraped': scraping_result.get('scraped_count', 0),
+                        'files_uploaded': scraping_result.get('uploaded_files_count', 0),
+                        'documents_downloaded': scraping_result.get('file_downloads_summary', {}).get('total_downloaded', 0) if download_files else 0
+                    },
+                    'storage': {
+                        'container_name': scraping_result.get('container_name'),
+                        'summary_blob': scraping_result.get('summary_blob_name'),
+                        'uploaded_to_azure': scraping_result.get('uploaded_to_azure', False)
+                    },
+                    'message': f'Full details available in Azure Storage. Payload reduced from {payload_size_kb:.1f}KB to stay under 16KB limit.'
+                }
+                final_result = minimal_result
+            else:
+                if not context.is_replaying:
+                    logger.info(f"[ORCHESTRATOR] Payload size {payload_size_kb:.1f}KB is within 16KB limit")
+                    
+        except Exception as size_e:
+            if not context.is_replaying:
+                logger.error(f"[ORCHESTRATOR] Payload size check failed: {str(size_e)}")
 
         # Set final status
         progress['current_step'] = 'completed'
         progress['final_result'] = final_result
         if not context.is_replaying:
             context.set_custom_status(progress)
-            logger.info(f"[ORCHESTRATOR SUCCESS] Full workflow completed for {website}")
+            logger.info(f"[ORCHESTRATOR SUCCESS] Workflow completed for {website}")
         
         return final_result
 
     except Exception as e:
         if not context.is_replaying:
-            logger.error(f"[ORCHESTRATOR ERROR] Full workflow failed: {str(e)}")
-            progress['current_step'] = 'failed'
-            progress['error'] = str(e)
-            context.set_custom_status(progress)
+            logger.error(f"[ORCHESTRATOR ERROR] Workflow failed: {str(e)}")
+            error_progress = {
+                'website': website,
+                'current_step': 'failed',
+                'error': str(e)
+            }
+            context.set_custom_status(error_progress)
         
         return {
             'website': website,
@@ -180,6 +222,100 @@ def scraping_orchestrator(context: df.DurableOrchestrationContext):
             'error': str(e),
             'failed_at': context.current_utc_datetime.isoformat()
         }
+
+@app.activity_trigger(input_name="input_data")
+def load_discovery_results(input_data):
+    """
+    Load discovery results from Azure Storage for the scraping phase
+    """
+    website = input_data.get('website', 'cbuae')
+    
+    logger.info(f"[LOAD DISCOVERY] Loading discovery results for {website}")
+    
+    try:
+        # Get storage account
+        storage_account = get_storage_account()
+        
+        container_name = "scrapeddata"
+        container_client = storage_account.get_container_client(container_name)
+        
+        # Create blob path for discovery results
+        date_str = datetime.now().strftime('%Y%m%d')
+        blob_path = f"discovery/{date_str}/{website}/discovery_results.json"
+        
+        # Try to download the discovery results
+        blob_client = container_client.get_blob_client(blob_path)
+        
+        if blob_client.exists():
+            blob_data = blob_client.download_blob().readall()
+            discovery_data = json.loads(blob_data.decode('utf-8'))
+            
+            logger.info(f"[LOAD DISCOVERY] Successfully loaded discovery results for {website}")
+            logger.info(f"[LOAD DISCOVERY] Found {len(discovery_data.get('discovered_urls', {}))} discovered URLs")
+            
+            return {
+                "status": "success",
+                "website": website,
+                "discovery_data": discovery_data,
+                "blob_path": blob_path,
+                "loaded_at": datetime.utcnow().isoformat()
+            }
+        else:
+            logger.error(f"[LOAD DISCOVERY] No discovery results found at {blob_path}")
+            return {
+                "status": "error",
+                "message": f"No discovery results found for {website}. Please run discovery first.",
+                "expected_path": blob_path
+            }
+            
+    except Exception as e:
+        logger.error(f"[LOAD DISCOVERY] Error loading discovery results: {e}")
+        return {
+            "status": "error",
+            "message": f"Error loading discovery results: {str(e)}",
+            "website": website
+        }
+
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+
+def load_stored_discovery_data(discovery_filepath: str) -> Dict[str, Any]:
+    """
+    Load full discovery data from stored file
+    """
+    try:
+        import json
+        with open(discovery_filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load discovery data from {discovery_filepath}: {str(e)}")
+        return {}
+
+def load_stored_scraped_data(scraped_filepath: str) -> Dict[str, Any]:
+    """
+    Load full scraped data from stored file
+    """
+    try:
+        import json
+        with open(scraped_filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load scraped data from {scraped_filepath}: {str(e)}")
+        return {}
+
+def cleanup_temp_files(file_paths: list):
+    """
+    Clean up temporary files after processing is complete
+    """
+    import os
+    for filepath in file_paths:
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                logger.info(f"Cleaned up temporary file: {filepath}")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup file {filepath}: {str(e)}")
 
 # ==============================================================================
 # ACTIVITY FUNCTIONS
@@ -221,15 +357,81 @@ def discover_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
         if filters:
             urls = [url for url in urls if not any(f.lower() in url.lower() for f in filters)]
 
-        result = {
+        # Upload discovery data directly to Azure Storage instead of local files
+        import json
+        from datetime import datetime
+        from StorageAccount import StorageAccount
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Prepare full discovery data for direct upload
+        full_discovery_data = {
             'urls': urls,
             'structure': discovered_structure,
             'total_urls_found': len(urls),
             'site_type': site_type,
             'status': 'completed',
-            'website': website
+            'website': website,
+            'discovery_timestamp': datetime.now().isoformat(),
+            'filters_applied': filters if filters else []
         }
-        logger.info(f"[ACTIVITY DISCOVERY SUCCESS] Found {len(urls)} URLs for {website}")
+        
+        # Upload discovery data directly to Azure Storage
+        discovery_blob_name = f"discovery/{datetime.now().strftime('%Y%m%d')}/{website}/discovery_{timestamp}.json"
+        container_name = "scrapeddata"  # Use the configured container name
+        storage_upload_success = False
+        
+        try:
+            storage = StorageAccount()
+            
+            # Convert to JSON string for upload
+            discovery_json = json.dumps(full_discovery_data, indent=2, ensure_ascii=False)
+            
+            # Upload directly to Azure Storage
+            upload_result = storage.upload_text_content(
+                container_name=container_name,
+                blob_name=discovery_blob_name,
+                content=discovery_json,
+                content_type="application/json"
+            )
+            
+            if upload_result.get('status') == 'success':
+                storage_upload_success = True
+                logger.info(f"[ACTIVITY DISCOVERY] Discovery data uploaded to Azure Storage: {discovery_blob_name}")
+            else:
+                logger.warning(f"[ACTIVITY DISCOVERY] Failed to upload discovery data: {upload_result.get('error', 'Unknown error')}")
+                
+        except Exception as upload_e:
+            logger.error(f"[ACTIVITY DISCOVERY] Azure Storage upload failed: {str(upload_e)}")
+        
+        # Return optimized payload with Azure Storage reference (no local files)
+        result = {
+            'urls': urls,
+            'total_urls_found': len(urls),
+            'site_type': site_type,
+            'status': 'completed',
+            'website': website,
+            'discovery_blob_name': discovery_blob_name if storage_upload_success else None,
+            'container_name': container_name if storage_upload_success else None,
+            'discovery_uploaded': storage_upload_success
+        }
+        
+        # Include structure only for very small discoveries
+        if len(urls) <= 10 and len(str(discovered_structure)) < 2000:
+            result['structure'] = discovered_structure
+            result['structure_included'] = True
+        else:
+            # For large discoveries, include only summary - full data in Azure Storage
+            result['structure_summary'] = {
+                'has_structure': True,
+                'main_items_count': len(discovered_structure.get('main_items', [])),
+                'structure_size_chars': len(str(discovered_structure)),
+                'stored_in_azure': discovery_blob_name if storage_upload_success else None,
+                'message': f'Full structure with {len(discovered_structure.get("main_items", []))} items uploaded to Azure Storage'
+            }
+            result['structure_included'] = False
+            
+        logger.info(f"[ACTIVITY DISCOVERY SUCCESS] Found {len(urls)} URLs for {website}, uploaded to Azure Storage: {discovery_blob_name}")
         return result
 
     except Exception as e:
@@ -275,33 +477,21 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
             logger.info(f"[ACTIVITY SCRAPING] Starting file downloads for {website}")
             
             try:
-                # Setup Azure Storage for file downloads
-                account_name = os.getenv('AZURE_STORAGE_ACCOUNT_NAME', 'explorationstorage12')
-                container_name = os.getenv('AZURE_STORAGE_CONTAINER_NAME', 'data')
+                # Setup HTTP session for file downloads
+                file_session = requests.Session()
+                file_session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
                 
-                if account_name and container_name:
-                    credential = DefaultAzureCredential()
-                    blob_service_client = BlobServiceClient(
-                        account_url=f"https://{account_name}.blob.core.windows.net",
-                        credential=credential
-                    )
-                    blob_container_client = blob_service_client.get_container_client(container_name)
-                    
-                    # Setup HTTP session for file downloads
-                    file_session = requests.Session()
-                    file_session.headers.update({
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                    })
-                    
-                    downloaded_files = []
-                    failed_downloads = []
-                    uploaded_hashes = set()
-                    files_found_count = 0
-                    
-                    # Scan URLs for attachments (limit to prevent timeouts)
-                    urls_to_scan = urls[:max_files]
-                    
-                    for url in urls_to_scan:
+                downloaded_files = []
+                failed_downloads = []
+                uploaded_hashes = set()
+                files_found_count = 0
+                
+                # Scan URLs for attachments (limit to prevent timeouts)
+                urls_to_scan = urls[:max_files]
+                
+                for url in urls_to_scan:
                         if files_found_count >= max_files:
                             break
                             
@@ -342,26 +532,20 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                                                     
                                                     # Generate filename
                                                     ext = ".pdf" if doc_type == 'PDF' else (".docx" if 'docx' in full_url else ".doc")
-                                                    timestamp = int(time.time())
+                                                    current_timestamp = int(time.time())
                                                     safe_text = ''.join(c for c in text[:30] if c.isalnum() or c in ' -_').strip().replace(' ', '_')
-                                                    filename = f"{safe_text}_{timestamp}_{files_found_count+1}{ext}" if safe_text else f"document_{timestamp}_{files_found_count+1}{ext}"
-                                                    blob_path = f"{website}/{doc_type.lower()}s/{filename}"
+                                                    filename = f"{safe_text}_{current_timestamp}_{files_found_count+1}{ext}" if safe_text else f"document_{current_timestamp}_{files_found_count+1}{ext}"
 
-                                                    # Upload to blob storage
-                                                    blob_container_client.upload_blob(
-                                                        name=blob_path,
-                                                        data=file_response.content,
-                                                        overwrite=False
-                                                    )
-
+                                                    # Store file info for later upload to Azure Storage
                                                     downloaded_files.append({
                                                         'filename': filename,
-                                                        'blob_path': blob_path,
+                                                        'content': file_response.content,
                                                         'size': len(file_response.content),
                                                         'url': full_url,
                                                         'text': text[:50],
                                                         'type': doc_type,
-                                                        'source_page': url
+                                                        'source_page': url,
+                                                        'content_type': 'application/pdf' if doc_type == 'PDF' else 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
                                                     })
                                                     
                                                     files_found_count += 1
@@ -388,33 +572,217 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                         except Exception as page_e:
                             logger.warning(f"[SCRAPING] Error checking files on {url}: {str(page_e)}")
                             continue
-                    
-                    # Update file download results
-                    file_download_result = {
-                        'total_downloaded': len(downloaded_files),
-                        'total_failed': len(failed_downloads),
-                        'downloaded_files': downloaded_files,
-                        'failed_downloads': failed_downloads[:5],  # Limit for response size
-                        'total_size_bytes': sum(f['size'] for f in downloaded_files)
-                    }
-                    
-                    logger.info(f"[ACTIVITY SCRAPING] Downloaded {len(downloaded_files)} files during scraping")
-                    
+                
+                # Update file download results
+                file_download_result = {
+                    'total_downloaded': len(downloaded_files),
+                    'total_failed': len(failed_downloads),
+                    'downloaded_files': downloaded_files,
+                    'failed_downloads': failed_downloads[:5],  # Limit for response size
+                    'total_size_bytes': sum(f['size'] for f in downloaded_files)
+                }
+                
+                logger.info(f"[ACTIVITY SCRAPING] Downloaded {len(downloaded_files)} files during scraping")
+                
             except Exception as download_e:
                 logger.error(f"[ACTIVITY SCRAPING] File download error: {str(download_e)}")
                 file_download_result['error'] = str(download_e)
 
-        # Prepare result with both scraped content and file download info
+        # Upload scraped data directly to Azure Storage (no local temp files for large datasets)
+        import json
+        import os
+        from datetime import datetime
+        from StorageAccount import StorageAccount
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        container_name = "scrapeddata"  # Use the configured container name
+        date_folder = datetime.now().strftime('%Y%m%d')  # Create date-based folder structure
+        
+        # Upload individual page data and files directly to Azure Storage
+        uploaded_pages = []
+        uploaded_files = []
+        storage_upload_success = False
+        
+        try:
+            storage = StorageAccount()
+            
+            # Upload individual scraped pages
+            for i, (url, content) in enumerate(scraped_data.items(), 1):
+                page_blob_name = f"pages/{date_folder}/{website}/{timestamp}/page_{i}.json"
+                page_data = {
+                    'url': url,
+                    'content': content,
+                    'page_number': i,
+                    'scraping_timestamp': datetime.now().isoformat()
+                }
+                
+                page_json = json.dumps(page_data, indent=2, ensure_ascii=False)
+                upload_result = storage.upload_text_content(
+                    container_name=container_name,
+                    blob_name=page_blob_name,
+                    content=page_json,
+                    content_type="application/json"
+                )
+                
+                if upload_result.get('status') == 'success':
+                    uploaded_pages.append({
+                        'blob_name': page_blob_name,
+                        'url': url[:100],  # Truncate long URLs
+                        'content_size': len(str(content))
+                    })
+            
+            # Upload downloaded files directly to Azure Storage (if any)
+            if download_files and downloaded_files:
+                for file_info in downloaded_files:
+                    file_blob_name = f"attachments/{date_folder}/{website}/{timestamp}/{file_info['filename']}"
+                    
+                    # Upload file content directly to Azure Storage
+                    try:
+                        file_upload_result = storage.upload_blob_content(
+                            container_name=container_name,
+                            blob_name=file_blob_name,
+                            content=file_info['content'],  # Use content directly from memory
+                            content_type=file_info.get('content_type', 'application/octet-stream')
+                        )
+                        
+                        if file_upload_result.get('status') == 'success':
+                            uploaded_files.append({
+                                'blob_name': file_blob_name,
+                                'filename': file_info['filename'],
+                                'size': file_info['size'],
+                                'blob_url': file_upload_result.get('blob_url'),
+                                'source_url': file_info['url'][:100],
+                                'type': file_info['type']
+                            })
+                            logger.info(f"[ACTIVITY SCRAPING] Uploaded file: {file_info['filename']} ({file_info['size']} bytes)")
+                        else:
+                            logger.error(f"[ACTIVITY SCRAPING] Failed to upload {file_info['filename']}: {file_upload_result.get('error')}")
+                            
+                    except Exception as file_e:
+                        logger.error(f"[ACTIVITY SCRAPING] Failed to upload file {file_info['filename']}: {str(file_e)}")
+            
+            # Upload summary data
+            summary_blob_name = f"summaries/{date_folder}/{website}/summary_{timestamp}.json"
+            summary_data = {
+                'website': website,
+                'scraped_count': len(scraped_data),
+                'scraping_timestamp': datetime.now().isoformat(),
+                'download_files_enabled': download_files,
+                'file_downloads': {
+                    'total_downloaded': len(downloaded_files),
+                    'total_failed': file_download_result.get('total_failed', 0),
+                    'total_size_bytes': sum(f['size'] for f in downloaded_files),
+                    'files_by_type': {
+                        'PDF': len([f for f in downloaded_files if f['type'] == 'PDF']),
+                        'Word': len([f for f in downloaded_files if f['type'] == 'Word'])
+                    }
+                } if download_files else None,
+                'uploaded_pages': len(uploaded_pages),
+                'uploaded_files': len(uploaded_files),
+                'pages_blob_references': uploaded_pages[:10],  # Sample references
+                'files_blob_references': uploaded_files[:10],   # Sample references
+                'container_name': container_name,
+                'storage_structure': {
+                    'pages_path': f'pages/{date_folder}/{website}/{timestamp}/',
+                    'attachments_path': f'attachments/{date_folder}/{website}/{timestamp}/',
+                    'discovery_path': f'discovery/{date_folder}/{website}/',
+                    'summary_path': f'summaries/{date_folder}/{website}/'
+                }
+            }
+            
+            summary_json = json.dumps(summary_data, indent=2, ensure_ascii=False)
+            summary_upload = storage.upload_text_content(
+                container_name=container_name,
+                blob_name=summary_blob_name,
+                content=summary_json,
+                content_type="application/json"
+            )
+            
+            if summary_upload.get('status') == 'success':
+                storage_upload_success = True
+                logger.info(f"[ACTIVITY SCRAPING] All data uploaded to Azure Storage - Pages: {len(uploaded_pages)}, Files: {len(uploaded_files)}")
+            
+        except Exception as upload_e:
+            logger.error(f"[ACTIVITY SCRAPING] Azure Storage upload failed: {str(upload_e)}")
+
         result = {
             'status': 'completed', 
             'scraped_count': len(scraped_data), 
-            'scraped_data': scraped_data, 
-            'website': website
+            'website': website,
+            'uploaded_to_azure': storage_upload_success,
+            'container_name': container_name if storage_upload_success else None,
+            'summary_blob_name': summary_blob_name if storage_upload_success else None,
+            'uploaded_pages_count': len(uploaded_pages),
+            'uploaded_files_count': len(uploaded_files)
         }
         
-        # Add file download results if enabled
+        # Add file download summary if enabled
         if download_files:
-            result['file_downloads'] = file_download_result
+            result['file_downloads_summary'] = {
+                'total_downloaded': file_download_result.get('total_downloaded', 0),
+                'total_failed': file_download_result.get('total_failed', 0),
+                'total_size_bytes': file_download_result.get('total_size_bytes', 0),
+                'uploaded_to_azure': len(uploaded_files)
+            }
+        
+        if len(scraped_data) <= 3:
+            # Very small datasets - include full data
+            result['scraped_data'] = scraped_data
+            result['data_included'] = True
+        else:
+            # Larger datasets - include only summary, full data in Azure Storage
+            sample_urls = list(scraped_data.keys())[:5]
+            result['scraped_data_summary'] = {
+                'total_entries': len(scraped_data),
+                'sample_urls': sample_urls,
+                'has_content': len(scraped_data) > 0,
+                'stored_in_azure': summary_blob_name if storage_upload_success else None,
+                'message': f'Full scraped data for {len(scraped_data)} pages uploaded to Azure Storage'
+            }
+            result['data_included'] = False
+        
+        # Test payload size to ensure we're under limit
+        try:
+            import json
+            payload_json = json.dumps(result, ensure_ascii=False)
+            payload_size_kb = len(payload_json.encode('utf-8')) / 1024
+            
+            if payload_size_kb > 8:  # Very conservative limit for activity functions
+                logger.warning(f"[ACTIVITY SCRAPING] Payload still large {payload_size_kb:.1f}KB, using ultra-minimal result")
+                
+                # Ultra-minimal result for very large payloads
+                result = {
+                    'status': 'completed',
+                    'scraped_count': len(scraped_data),
+                    'website': website,
+                    'payload_optimized': True,
+                    'original_size_kb': payload_size_kb,
+                    'message': 'Ultra-minimal result - all details in processed files'
+                }
+                
+                if download_files:
+                    result['files_downloaded'] = file_download_result.get('total_downloaded', 0)
+            else:
+                logger.info(f"[ACTIVITY SCRAPING] Payload size {payload_size_kb:.1f}KB within safe limits")
+                
+        except Exception as e:
+            logger.error(f"[ACTIVITY SCRAPING] Payload optimization error: {str(e)}")
+            # Emergency fallback - absolute minimal result
+            result = {
+                'status': 'completed',
+                'scraped_count': len(scraped_data),
+                'website': website,
+                'error': 'Payload optimization failed',
+                'message': 'Minimal result due to size constraints'
+            }
+            # Fallback to basic result
+            result = {
+                'status': 'completed',
+                'scraped_count': len(scraped_data),
+                'website': website,
+                'error': 'Payload optimization failed',
+                'original_error': str(e)
+            }
         
         logger.info(f"[ACTIVITY SCRAPING SUCCESS] Scraped {len(scraped_data)} pages, downloaded {file_download_result['total_downloaded']} files for {website}")
         return result
@@ -431,7 +799,21 @@ def process_scraped_data(input_data: Dict[str, Any]) -> Dict[str, Any]:
 
         if scraping_result['status'] != 'completed':
             raise ValueError("Scraping failed")
-        scraped_data = scraping_result['scraped_data']
+        
+        # Check if scraped data is included directly or stored in file
+        if scraping_result.get('data_included', True):
+            # Data is included in the result
+            scraped_data = scraping_result.get('scraped_data', {})
+        else:
+            # Data is stored in file - load it
+            scraped_filepath = scraping_result.get('scraped_file')
+            if scraped_filepath:
+                logger.info(f"[ACTIVITY PROCESSING] Loading scraped data from: {scraped_filepath}")
+                stored_data = load_stored_scraped_data(scraped_filepath)
+                scraped_data = stored_data.get('scraped_data', {})
+            else:
+                scraped_data = {}
+        
         if not scraped_data:
             return {'status': 'completed', 'processed_count': 0, 'saved_files': [], 'message': 'No data'}
 
@@ -481,28 +863,30 @@ def upload_to_storage(input_data: Dict[str, Any]) -> Dict[str, Any]:
         return {'status': 'failed', 'error': str(e), 'total_successful': 0, 'total_failed': 1}
 
 # ==============================================================================
-# HTTP TRIGGERS
+# HTTP TRIGGERS - THREE API ENDPOINTS ONLY
 # ==============================================================================
 
 @app.route(route="scraper", methods=["POST"])
 @app.durable_client_input(client_name="client")
-async def http_start_full_scraper(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+async def http_start_scraper(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
     """
-    Start full scraping workflow with optional file downloads
+    Start full scraping workflow - automatically loads discovery results from storage and then scrapes
     POST /api/scraper
     Body: {
-        "website": "cbuae", 
-        "upload_to_cloud": true,
-        "download_files": false,
-        "max_files": 10
+        "website": "cbuae",
+        "max_files": 100,
+        "force_discovery": false  # Optional: force new discovery if true
     }
     """
     try:
         body = req.get_json()
         website = body.get("website", "cbuae") if body else "cbuae"
-        upload_to_cloud = body.get("upload_to_cloud", True) if body else True
-        download_files = body.get("download_files", False) if body else False
-        max_files = body.get("max_files", 10) if body else 10  # Reduced default
+        max_files = body.get("max_files", 100) if body else 100
+        force_discovery = body.get("force_discovery", False) if body else False
+        
+        # Hardcoded production settings
+        upload_to_cloud = True  # Always upload to Azure Storage
+        download_files = True   # Always download attachments
 
         if website not in WEBSITES:
             return func.HttpResponse(
@@ -514,27 +898,30 @@ async def http_start_full_scraper(req: func.HttpRequest, client: df.DurableOrche
                 mimetype="application/json"
             )
 
-        # Start orchestrator with enhanced parameters
+        # Start orchestrator with production parameters - it will load discovery from storage
         instance_id = await client.start_new("scraping_orchestrator", client_input={
             "website": website, 
             "mode": "full", 
             "upload_to_cloud": upload_to_cloud,
             "download_files": download_files,
-            "max_files": max_files
+            "max_files": max_files,
+            "force_discovery": force_discovery
         })
         
-        logger.info(f"[HTTP FULL SCRAPER] Started workflow {instance_id} for {website} (files: {download_files})")
+        logger.info(f"[HTTP SCRAPER] Started workflow {instance_id} for {website} (loads discovery from storage)")
 
-        # Return enhanced response
+        # Return production response
         response_data = {
-            "message": f"Full scraping started for {website}",
+            "message": f"Scraping started for {website} - will load discovery from storage",
             "instance_id": instance_id,
             "status_url": f"/api/scraper/status/{instance_id}",
             "website": website,
-            "mode": "full",
-            "upload_to_cloud": upload_to_cloud,
-            "download_files": download_files,
+            "mode": "production",
+            "upload_to_cloud": True,
+            "download_files": True,
             "max_files": max_files,
+            "force_discovery": force_discovery,
+            "note": "Discovery results automatically loaded from Azure Storage",
             "started_at": datetime.utcnow().isoformat()
         }
         
@@ -545,7 +932,7 @@ async def http_start_full_scraper(req: func.HttpRequest, client: df.DurableOrche
         )
 
     except Exception as e:
-        logger.error(f"[HTTP FULL SCRAPER ERROR] {str(e)}")
+        logger.error(f"[HTTP SCRAPER ERROR] {str(e)}")
         return func.HttpResponse(
             json.dumps({"error": str(e)}), 
             status_code=500, 
@@ -596,18 +983,42 @@ async def http_get_scraping_status(req: func.HttpRequest, client: df.DurableOrch
 def http_health_check(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(json.dumps({"status": "healthy", "service": "durable-web-scraper-functions", "timestamp": datetime.utcnow().isoformat(), "available_websites": list(WEBSITES.keys()), "storage_account": os.getenv('AZURE_STORAGE_ACCOUNT_NAME', 'not_configured'), "mode": "durable_functions"}), mimetype="application/json")
 
-@app.schedule(schedule="0 0 9 * * *", arg_name="mytimer", run_on_startup=False)
+@app.schedule(schedule="0 0 9 1 * *", arg_name="mytimer", run_on_startup=False)
 @app.durable_client_input(client_name="client")
 async def timer_start_scraper(mytimer: func.TimerRequest, client: df.DurableOrchestrationClient):
+    """
+    Monthly timer trigger - runs on the 1st day of each month at 9:00 AM UTC
+    Controlled by TIMER_ENABLED environment variable
+    Production mode: always uploads to cloud and downloads files
+    """
+    # Check if timer is enabled
+    timer_enabled = os.getenv('TIMER_ENABLED', 'false').lower() == 'true'
+    
+    if not timer_enabled:
+        logger.info('[TIMER] Timer trigger is disabled via TIMER_ENABLED environment variable')
+        return
+    
     if mytimer.past_due:
         logger.info('[TIMER] The timer is past due!')
 
-    logger.info('[TIMER] Trigger fired - starting daily workflow')
+    logger.info('[TIMER] Monthly trigger fired - starting production scraping workflow')
     try:
         website = os.getenv('SCRAPING_WEBSITE', 'cbuae')
-        upload_to_cloud = os.getenv('SCRAPING_UPLOAD_TO_CLOUD', 'true').lower() == 'true'
-        instance_id = await client.start_new("scraping_orchestrator", client_input={"website": website, "mode": 'full', "upload_to_cloud": upload_to_cloud})
-        logger.info(f'[TIMER SUCCESS] Started workflow {instance_id} for {website}')
+        max_files = int(os.getenv('SCRAPING_MAX_FILES', '500'))  # Increased for production
+        
+        # Hardcoded production settings
+        upload_to_cloud = True  # Always upload to Azure Storage
+        download_files = True   # Always download attachments
+        
+        instance_id = await client.start_new("scraping_orchestrator", client_input={
+            "website": website, 
+            "mode": 'production', 
+            "upload_to_cloud": upload_to_cloud,
+            "download_files": download_files,
+            "max_files": max_files
+        })
+        
+        logger.info(f'[TIMER SUCCESS] Started monthly production workflow {instance_id} for {website}')
     except Exception as e:
         logger.error(f'[TIMER ERROR] {str(e)}')
         raise

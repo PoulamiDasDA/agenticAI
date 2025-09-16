@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 STORAGE_CONFIG = {
     'account_name': os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "explorationstorage12"),
     'container_name': os.getenv("AZURE_STORAGE_CONTAINER_NAME", "data"),
-    'credential_type': "AAD" 
+    'credential_type': os.getenv("AZURE_CREDENTIAL_TYPE", "AAD")  # Use environment variable
 }
 
 WEBSITES = {

@@ -1,9 +1,10 @@
-# Build tools (required for Azure Functions remote build)
+# Azure Functions core dependencies - EXACT versions for stability
+azure-functions==1.18.0
+azure-functions-durable==1.2.8
+
+# Build tools
 setuptools>=65.0.0
 wheel>=0.37.0
-
-azure-functions
-azure-functions-durable
 
 
 # Web scraping

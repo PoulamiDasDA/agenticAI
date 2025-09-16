@@ -12,11 +12,18 @@ load_dotenv()
 class StorageAccount:
     """Azure Storage with AAD authentication (works when key-based auth is disabled)"""
     
-    def __init__(self, storage_account_name, container_name,credential_type):
-        self.storage_account_name = storage_account_name
-        self.container_name = container_name
+    def __init__(self, storage_account_name=None, container_name=None, credential_type=None):
+        self.storage_account_name = storage_account_name or os.getenv('AZURE_STORAGE_ACCOUNT_NAME', 'defaultstorageaccount')
+        self.container_name = container_name or os.getenv('AZURE_STORAGE_CONTAINER_NAME', 'default-container')
         self.azure_available = False
-        self.credential_type = credential_type
+        
+        # Auto-detect environment: Use AZURE_CREDENTIAL_TYPE to control authentication
+        if credential_type:
+            self.credential_type = credential_type
+        elif os.getenv('AZURE_CREDENTIAL_TYPE'):
+            self.credential_type = os.getenv('AZURE_CREDENTIAL_TYPE')
+        else:
+            self.credential_type = 'AAD'  # Default for local development
         
         # Set up logging
         logging.basicConfig(level=logging.INFO)
@@ -29,57 +36,33 @@ class StorageAccount:
         """Try different AAD authentication methods"""
         account_url = f"https://{self.storage_account_name}.blob.core.windows.net"
         
-        if self.credential_type == 'CLI':
-            # Method 1: Try Azure CLI credential (most common for development)
+        # Check if using Azurite for local development
+        if self.storage_account_name == 'devstoreaccount1':
             try:
-                from azure.identity import AzureCliCredential
                 from azure.storage.blob import BlobServiceClient
                 
-                credential = AzureCliCredential()
-                self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
+                # Azurite connection string
+                azurite_connection_string = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+                
+                self.blob_service_client = BlobServiceClient.from_connection_string(azurite_connection_string)
                 
                 # Test the connection
                 container_client = self.blob_service_client.get_container_client(self.container_name)
-                container_client.exists()
+                try:
+                    container_client.exists()
+                except:
+                    # Create container if it doesn't exist
+                    container_client.create_container()
                 
                 self.azure_available = True
-                self.logger.info("✅ Azure CLI authentication successful")
+                self.logger.info("Azurite local storage connection successful")
                 return
                 
             except Exception as e:
-                self.logger.warning(f"Azure CLI auth failed: {e}")
+                self.logger.warning(f"Azurite connection failed: {e}")
         
-        elif self.credential_type == 'serviceprincipal':
-            # Method 2: Try environment variables (service principal)
-            try:
-                from azure.identity import ClientSecretCredential
-                from azure.storage.blob import BlobServiceClient
-                
-                tenant_id = os.getenv("AZURE_TENANT_ID")
-                client_id = os.getenv("AZURE_CLIENT_ID") 
-                client_secret = os.getenv("AZURE_CLIENT_SECRET")
-                
-                if all([tenant_id, client_id, client_secret]):
-                    credential = ClientSecretCredential(
-                        tenant_id=tenant_id,
-                        client_id=client_id,
-                        client_secret=client_secret
-                    )
-                    self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
-                    
-                    # Test connection
-                    container_client = self.blob_service_client.get_container_client(self.container_name)
-                    container_client.exists()
-                    
-                    self.azure_available = True
-                    self.logger.info("✅ Service Principal authentication successful")
-                    return
-                    
-            except Exception as e:
-                self.logger.warning(f"Service Principal auth failed: {e}")
-        
-        elif self.credential_type == 'AAD':
-            # Method 3: Try DefaultAzureCredential (but with better error handling)
+        if self.credential_type == 'AAD':
+            # Method 1: Try DefaultAzureCredential (works for development and CI/CD)
             try:
                 from azure.identity import DefaultAzureCredential
                 from azure.storage.blob import BlobServiceClient
@@ -87,20 +70,69 @@ class StorageAccount:
                 credential = DefaultAzureCredential()
                 self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
                 
-                # Test connection with timeout
+                # Test the connection
                 container_client = self.blob_service_client.get_container_client(self.container_name)
                 container_client.exists()
                 
                 self.azure_available = True
-                self.logger.info("✅ Default Azure Credential authentication successful")
+                self.logger.info("DefaultAzureCredential authentication successful")
                 return
                 
             except Exception as e:
-                self.logger.warning(f"Default credential auth failed: {e}")
+                self.logger.warning(f"DefaultAzureCredential auth failed: {e}")
+        
+        elif self.credential_type == 'managedidentity':
+            # Method 4: Try ManagedIdentityCredential for Azure Functions
+            try:
+                from azure.identity import ManagedIdentityCredential
+                from azure.storage.blob import BlobServiceClient
+                
+                # For system-assigned managed identity, don't pass client_id
+                # For user-assigned managed identity, pass client_id
+                client_id = os.getenv('AZURE_CLIENT_ID') or os.getenv('AzureWebJobsStorage__clientId')
+                if client_id:
+                    # User-assigned managed identity
+                    credential = ManagedIdentityCredential(client_id=client_id)
+                    self.logger.info(f"Using user-assigned managed identity: {client_id}")
+                else:
+                    # System-assigned managed identity (default)
+                    credential = ManagedIdentityCredential()
+                    self.logger.info("Using system-assigned managed identity")
+                
+                self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
+                
+                # Test connection
+                container_client = self.blob_service_client.get_container_client(self.container_name)
+                container_client.exists()
+                
+                self.azure_available = True
+                self.logger.info("Managed Identity authentication successful")
+                return
+                
+            except Exception as e:
+                self.logger.warning(f"Managed Identity auth failed: {e}")
+                # Fallback to DefaultAzureCredential
+                try:
+                    from azure.identity import DefaultAzureCredential
+                    from azure.storage.blob import BlobServiceClient
+                    
+                    credential = DefaultAzureCredential()
+                    self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
+                    
+                    # Test connection
+                    container_client = self.blob_service_client.get_container_client(self.container_name)
+                    container_client.exists()
+                    
+                    self.azure_available = True
+                    self.logger.info("Fallback to Default Azure Credential successful")
+                    return
+                    
+                except Exception as fallback_e:
+                    self.logger.warning(f"Fallback credential auth also failed: {fallback_e}")
         
         # If all methods fail
         self.azure_available = False
-        self.logger.warning("⚠️ All Azure authentication methods failed - using local mode")
+        self.logger.warning("All Azure authentication methods failed - using local mode")
     
     
     def upload_file(self, local_file_path, blob_name=None, overwrite=True, metadata=None):
@@ -133,11 +165,11 @@ class StorageAccount:
                 blob_client.upload_blob(data, overwrite=overwrite, metadata=upload_metadata)
             
             blob_url = blob_client.url
-            self.logger.info(f"✅ Uploaded to Azure: {blob_name}")
+            self.logger.info(f"Uploaded to Azure: {blob_name}")
             return blob_url
             
         except Exception as e:
-            self.logger.error(f"❌ Azure upload failed for {local_file_path}: {e}")
+            self.logger.error(f"Azure upload failed for {local_file_path}: {e}")
             return f"file://{local_file_path}"
     
     def upload_scraped_data(self, individual_dir, summary_file=None, blob_prefix="central_bank_uae"):
@@ -213,7 +245,7 @@ class StorageAccount:
             }
             
         except Exception as e:
-            self.logger.error(f"❌ Upload operation failed: {e}")
+            self.logger.error(f"Upload operation failed: {e}")
             return {
                 'session_prefix': f"failed/{blob_prefix}",
                 'individual_files': {'successful_uploads': [], 'failed_uploads': [], 'total_files': 0, 'total_size_mb': 0},
@@ -257,7 +289,80 @@ class StorageAccount:
     def upload_directory(self, *args, **kwargs):
         return {'successful_uploads': [], 'failed_uploads': [], 'total_files': 0, 'total_size_mb': 0}
     
-    def upload_blob_content(self, blob_name, content, overwrite=True, metadata=None):
+    def upload_text_content(self, container_name, blob_name, content, content_type="text/plain", overwrite=True):
+        """Upload text content to Azure Storage"""
+        if not self.azure_available:
+            return {'status': 'failed', 'error': 'Azure Storage not available', 'blob_url': f"local://{blob_name}"}
+        
+        try:
+            from azure.storage.blob import ContentSettings
+            
+            # Ensure the configured container exists (not create new ones)
+            container_client = self.blob_service_client.get_container_client(container_name)
+            try:
+                if not container_client.exists():
+                    container_client.create_container()
+                    self.logger.info(f"Created container: {container_name}")
+            except Exception:
+                # Container might already exist, which is fine
+                pass
+            
+            blob_client = self.blob_service_client.get_blob_client(
+                container=container_name,
+                blob=blob_name
+            )
+            
+            # Create proper ContentSettings object
+            content_settings = ContentSettings(content_type=content_type)
+            
+            blob_client.upload_blob(
+                content.encode('utf-8'), 
+                overwrite=overwrite, 
+                content_settings=content_settings
+            )
+            return {'status': 'success', 'blob_url': blob_client.url}
+        except Exception as e:
+            self.logger.error(f"Error uploading text content: {e}")
+            return {'status': 'failed', 'error': str(e), 'blob_url': f"local://{blob_name}"}
+    
+    def upload_blob_content(self, container_name, blob_name, content, content_type="application/octet-stream", overwrite=True):
+        """Upload binary content to Azure Storage"""
+        if not self.azure_available:
+            return {'status': 'failed', 'error': 'Azure Storage not available', 'blob_url': f"local://{blob_name}"}
+        
+        try:
+            from azure.storage.blob import ContentSettings
+            
+            # Ensure the configured container exists (not create new ones)
+            container_client = self.blob_service_client.get_container_client(container_name)
+            try:
+                if not container_client.exists():
+                    container_client.create_container()
+                    self.logger.info(f"Created container: {container_name}")
+            except Exception:
+                # Container might already exist, which is fine
+                pass
+            
+            blob_client = self.blob_service_client.get_blob_client(
+                container=container_name,
+                blob=blob_name
+            )
+            
+            # Create proper ContentSettings object
+            content_settings = ContentSettings(content_type=content_type)
+            
+            blob_client.upload_blob(
+                content, 
+                overwrite=overwrite, 
+                content_settings=content_settings
+            )
+            return {'status': 'success', 'blob_url': blob_client.url}
+        except Exception as e:
+            self.logger.error(f"Error uploading blob content: {e}")
+            return {'status': 'failed', 'error': str(e), 'blob_url': f"local://{blob_name}"}
+
+    def upload_blob_content_legacy(self, blob_name, content, overwrite=True, metadata=None):
+        """Legacy method for backward compatibility"""
         if not self.azure_available:
             return f"local://{blob_name}"
         

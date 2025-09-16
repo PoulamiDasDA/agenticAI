@@ -24,7 +24,7 @@ class SimpleScraper:
         self.skeleton_discovery = SkeletonDiscovery()
 
     def get_response(self, url):
-        """Get HTTP response using unified utility"""
+        """Get HTTP response using unified utility with browser-like headers"""
         return self.http_utils.get_response(url)
 
     def get_soup(self, response):
@@ -646,7 +646,16 @@ class SimpleScraper:
                 
                 # Use unified HTTP utility for consistency
                 response = self.get_response(url)
+                if not response:
+                    logger.error(f"[ERROR] Failed to get response for {url}, skipping...")
+                    visited.add(url)  # Mark as visited to avoid retrying
+                    continue
+                    
                 soup = self.get_soup(response)
+                if not soup:
+                    logger.error(f"[ERROR] Failed to parse HTML for {url}, skipping...")
+                    visited.add(url)  # Mark as visited to avoid retrying
+                    continue
                 
                 # Extract data
                 data = {
@@ -694,11 +703,17 @@ class SimpleScraper:
                 
                 depth_summary = ", ".join([f"D{d}: {count}" for d, count in sorted(depth_counts.items())])
                 logger.info(f"[SUCCESS] Scraped successfully | Total: {len(visited)} | Queue: {len(to_visit)} | By depth: [{depth_summary}]")
-                time.sleep(2)  # Be respectful
+                
+                # Random delay between 2-5 seconds to be more human-like
+                import random
+                delay = random.uniform(2, 5)
+                time.sleep(delay)
                 
             except Exception as e:
                 logger.error(f"[ERROR] Error scraping {url}: {e}")
                 visited.add(url)  # Mark as visited even if failed to avoid retry
+                # Still add a delay even on error to avoid hammering the server
+                time.sleep(1)
                 continue
 
         logger.info(f"[COMPLETE] Scraping completed!")

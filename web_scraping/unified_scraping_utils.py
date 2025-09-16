@@ -13,21 +13,42 @@ logger = logging.getLogger(__name__)
 class HttpUtils:
     """HTTP request utilities"""
     
+    # Default browser-like headers to avoid bot detection
     DEFAULT_HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
     }
     
     @staticmethod
     def get_response(url, timeout=30, headers=None):
-        """Get HTTP response with error handling and retry logic"""
+        """Get HTTP response with browser-like headers and error handling"""
         try:
-            session_headers = HttpUtils.DEFAULT_HEADERS.copy()
-            if headers:
-                session_headers.update(headers)
+            # Use class default headers as base
+            browser_headers = HttpUtils.DEFAULT_HEADERS.copy()
             
-            response = requests.get(url, timeout=timeout, headers=session_headers)
+            # Update with any additional headers
+            if headers:
+                browser_headers.update(headers)
+            
+            response = requests.get(url, headers=browser_headers, timeout=timeout)
             response.raise_for_status()
             return response
+        except requests.exceptions.HTTPError as e:
+            if hasattr(e, 'response') and e.response is not None:
+                status_code = e.response.status_code
+                if status_code == 403:
+                    logger.error(f"[HTTP ERROR] Access forbidden (403) for {url}: {e}")
+                elif status_code == 404:
+                    logger.error(f"[HTTP ERROR] Page not found (404) for {url}: {e}")
+                else:
+                    logger.error(f"[HTTP ERROR] HTTP error {status_code} for {url}: {e}")
+            else:
+                logger.error(f"[HTTP ERROR] HTTP error for {url}: {e}")
+            return None
         except Exception as e:
             logger.error(f"[HTTP ERROR] Error fetching {url}: {e}")
             return None
