@@ -1,0 +1,22 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": "InstrumentationKey=your-instrumentation-key;IngestionEndpoint=https://your-region.in.applicationinsights.azure.com/;LiveEndpoint=https://your-region.livediagnostics.monitor.azure.com/;ApplicationId=your-application-id",
+    "AZURE_STORAGE_ACCOUNT_NAME": "devstoreaccount1",
+    "AZURE_STORAGE_CONTAINER_NAME": "your-container-name",
+    "AZURE_CREDENTIAL_TYPE": "AAD",
+    "SCRAPING_WEBSITE": "cbuae",
+    "TIMER_ENABLED": "false",
+    "SCRAPING_MAX_FILES": "500",
+    "LOG_LEVEL": "INFO",
+    "PYTHONPATH": "your-python-environment-path"
+  },
+  "ConnectionStrings": {},
+  "Host": {
+    "LocalHttpPort": 7071,
+    "CORS": "*"
+  }
+}

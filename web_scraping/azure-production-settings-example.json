@@ -1,0 +1,197 @@
+[
+  {
+    "name": "APPLICATIONINSIGHTS_AUTHENTICATION_STRING",
+    "value": "Authorization=AAD",
+    "slotSetting": false
+  },
+  {
+    "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+    "value": "InstrumentationKey=your-instrumentation-key;IngestionEndpoint=https://your-region.in.applicationinsights.azure.com/;LiveEndpoint=https://your-region.livediagnostics.monitor.azure.com/;ApplicationId=your-application-id",
+    "slotSetting": false
+  },
+  {
+    "name": "AZURE_CREDENTIAL_TYPE",
+    "value": "managedidentity",
+    "slotSetting": false
+  },
+  {
+    "name": "AZURE_OPENAI_ENDPOINT",
+    "value": "https://your-resource-name.openai.azure.com/",
+    "slotSetting": false
+  },
+  {
+    "name": "AZURE_OPENAI_GPT_DEPLOYMENT",
+    "value": "your-gpt-deployment-name",
+    "slotSetting": false
+  },
+  {
+    "name": "AZURE_SEARCH_ENDPOINT",
+    "value": "https://your-search-service.search.windows.net",
+    "slotSetting": false
+  },
+  {
+    "name": "AZURE_SEARCH_INDEX_NAME",
+    "value": "your-search-index-name",
+    "slotSetting": false
+  },
+  {
+    "name": "AZURE_STORAGE_ACCOUNT_NAME",
+    "value": "your-storage-account-name",
+    "slotSetting": false
+  },
+  {
+    "name": "AZURE_STORAGE_CONTAINER_NAME",
+    "value": "your-container-name",
+    "slotSetting": false
+  },
+  {
+    "name": "AzureWebJobsStorage__accountName",
+    "value": "your-storage-account-name",
+    "slotSetting": false
+  },
+  {
+    "name": "AzureWebJobsStorage__blobServiceUri",
+    "value": "https://your-storage-account-name.blob.core.windows.net",
+    "slotSetting": false
+  },
+  {
+    "name": "AzureWebJobsStorage__credential",
+    "value": "managedidentity",
+    "slotSetting": false
+  },
+  {
+    "name": "AzureWebJobsStorage__queueServiceUri",
+    "value": "https://your-storage-account-name.queue.core.windows.net",
+    "slotSetting": false
+  },
+  {
+    "name": "AzureWebJobsStorage__tableServiceUri",
+    "value": "https://your-storage-account-name.table.core.windows.net",
+    "slotSetting": false
+  },
+  {
+    "name": "BUILD_FLAGS",
+    "value": "UseExpressBuild",
+    "slotSetting": false
+  },
+  {
+    "name": "DurableTask__HubName",
+    "value": "WebScrapingTaskHub",
+    "slotSetting": false
+  },
+  {
+    "name": "DurableTask__StorageProvider__PartitionCount",
+    "value": "4",
+    "slotSetting": false
+  },
+  {
+    "name": "ENABLE_ORYX_BUILD",
+    "value": "true",
+    "slotSetting": false
+  },
+  {
+    "name": "FUNCTIONS_EXTENSION_VERSION",
+    "value": "~4",
+    "slotSetting": false
+  },
+  {
+    "name": "FUNCTIONS_WORKER_RUNTIME",
+    "value": "python",
+    "slotSetting": false
+  },
+  {
+    "name": "FUNCTIONS_WORKER_RUNTIME_VERSION",
+    "value": "3.11",
+    "slotSetting": false
+  },
+  {
+    "name": "LOG_LEVEL",
+    "value": "INFO",
+    "slotSetting": false
+  },
+  {
+    "name": "PROJECT_ENDPOINT",
+    "value": "https://your-resource-name.services.ai.azure.com/api/projects/your-project-name",
+    "slotSetting": false
+  },
+  {
+    "name": "PYTHON_THREADPOOL_THREAD_COUNT",
+    "value": "1",
+    "slotSetting": false
+  },
+  {
+    "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+    "value": "1",
+    "slotSetting": false
+  },
+  {
+    "name": "SCRAPING_FILTERS",
+    "value": "insurance",
+    "slotSetting": false
+  },
+  {
+    "name": "SCRAPING_MAX_DEPTH",
+    "value": "3",
+    "slotSetting": false
+  },
+  {
+    "name": "SCRAPING_MAX_FILES",
+    "value": "500",
+    "slotSetting": false
+  },
+  {
+    "name": "SCRAPING_WEBSITE",
+    "value": "cbuae",
+    "slotSetting": false
+  },
+  {
+    "name": "SQL_DATABASE_NAME",
+    "value": "your-database-name",
+    "slotSetting": false
+  },
+  {
+    "name": "SQL_PASSWORD",
+    "value": "your-sql-password-here",
+    "slotSetting": false
+  },
+  {
+    "name": "SQL_SERVER_NAME",
+    "value": "your-sql-server.database.windows.net",
+    "slotSetting": false
+  },
+  {
+    "name": "SQL_USERNAME",
+    "value": "your-sql-username",
+    "slotSetting": false
+  },
+  {
+    "name": "TIMER_ENABLED",
+    "value": "false",
+    "slotSetting": false
+  },
+  {
+    "name": "WEBSITE_RUN_FROM_PACKAGE",
+    "value": "1",
+    "slotSetting": false
+  },
+  {
+    "name": "WEBSITE_SKIP_CONTENT_COMPRESSION",
+    "value": "1",
+    "slotSetting": false
+  },
+  {
+    "name": "WEBSITE_USE_PLACEHOLDER",
+    "value": "0",
+    "slotSetting": false
+  },
+  {
+    "name": "WEBSITES_ENABLE_APP_SERVICE_STORAGE",
+    "value": "false",
+    "slotSetting": false
+  },
+  {
+    "name": "XDG_CACHE_HOME",
+    "value": "/tmp/.cache",
+    "slotSetting": false
+  }
+]

@@ -7,7 +7,7 @@
   "functionTimeout": "-1",
   "extensions": {
     "durableTask": {
-      "hubName": "WebScraperTaskHub",
+      "hubName": "WebScraperTaskHubV5",
       "storageProvider": {
         "connectionStringName": "AzureWebJobsStorage"
       },
