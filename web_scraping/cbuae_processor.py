@@ -184,6 +184,114 @@ class CbuaeProcessor:
             traceback.print_exc()
             return None
 
+    def flatten_individual_pages_from_session(self, date_folder: str, timestamp: str, website: str, storage_account: StorageAccount) -> List[str]:
+        """
+        Flatten individual page files from a scraping session.
+        
+        Args:
+            date_folder: Date folder (e.g., "20241217")
+            timestamp: Session timestamp (e.g., "20241217_143052") - for unique filenames
+            website: Website name (e.g., "cbuae")
+            storage_account: StorageAccount instance
+            
+        Returns:
+            List of blob paths for flattened individual page files
+        """
+        try:
+            flattened_blobs = []
+            
+            # List all page files in the session
+            page_prefix = f"{date_folder}/pages/{website}/"
+            logger.info(f"[INDIVIDUAL FLATTENING] Looking for pages with prefix: {page_prefix}")
+            
+            # Get list of page blobs (this would need to be implemented in StorageAccount)
+            page_blobs = storage_account.list_blobs_with_prefix("scrapeddata", page_prefix)
+            
+            for page_blob in page_blobs:
+                if page_blob.endswith('.json'):
+                    try:
+                        logger.info(f"[INDIVIDUAL FLATTENING] Processing: {page_blob}")
+                        
+                        # Download and parse the page content
+                        content = storage_account.download_blob_content("scrapeddata", page_blob)
+                        page_data = json.loads(content)
+                        
+                        # Extract page number from blob name (e.g., page_1.json -> 1)
+                        page_filename = page_blob.split('/')[-1]  # Get just the filename
+                        page_number = page_filename.replace('page_', '').replace('.json', '')
+                        
+                        # Flatten this individual page
+                        flattened_records = self.flatten_single_page_data(page_data, page_number)
+                        
+                        if flattened_records:
+                            # Upload flattened individual page
+                            output_content = json.dumps(flattened_records, ensure_ascii=False, indent=2)
+                            flattened_blob_name = f"{date_folder}/flattened/{website}/page_{page_number}_flattened_{timestamp}.json"
+                            
+                            upload_result = storage_account.upload_blob_content(
+                                container_name="scrapeddata",
+                                blob_name=flattened_blob_name,
+                                content=output_content,
+                                content_type="application/json"
+                            )
+                            
+                            if upload_result.get('status') == 'success':
+                                flattened_blobs.append(flattened_blob_name)
+                                logger.info(f"[INDIVIDUAL FLATTENING] ✅ Created: {flattened_blob_name} ({len(flattened_records)} records)")
+                            else:
+                                logger.error(f"[INDIVIDUAL FLATTENING] ❌ Failed to upload: {flattened_blob_name}")
+                                
+                    except Exception as page_e:
+                        logger.error(f"[INDIVIDUAL FLATTENING] Error processing {page_blob}: {str(page_e)}")
+                        continue
+            
+            logger.info(f"[INDIVIDUAL FLATTENING] Completed. Created {len(flattened_blobs)} flattened page files")
+            return flattened_blobs
+            
+        except Exception as e:
+            logger.error(f"[INDIVIDUAL FLATTENING] Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def flatten_single_page_data(self, page_data: Dict[str, Any], page_number: str) -> List[Dict[str, Any]]:
+        """
+        Flatten data from a single page.
+        
+        Args:
+            page_data: Single page data from scraping
+            page_number: Page number for tracking
+            
+        Returns:
+            List of flattened records from this page
+        """
+        try:
+            # Extract the actual content that needs flattening
+            # The page_data structure is: {'url': ..., 'title': ..., 'content': {...}}
+            content = page_data.get('content', {})
+            
+            if not content:
+                logger.warning(f"[SINGLE PAGE FLATTENING] No content found in page {page_number}")
+                return []
+            
+            # Use the existing flattening logic but for single page content
+            flattened_records = self.flatten_cbuae_data_memory(content)
+            
+            # Add page tracking metadata to each record
+            for record in flattened_records:
+                if 'metadata' not in record:
+                    record['metadata'] = {}
+                record['metadata']['source_page_number'] = page_number
+                record['metadata']['source_url'] = page_data.get('url', '')
+                record['metadata']['page_title'] = page_data.get('title', '')
+                record['metadata']['scraped_at'] = page_data.get('scraped_at', '')
+            
+            return flattened_records
+            
+        except Exception as e:
+            logger.error(f"[SINGLE PAGE FLATTENING] Error processing page {page_number}: {str(e)}")
+            return []
+
     def flatten_cbuae_data_memory(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Main function to flatten the CBUAE JSON data structure.

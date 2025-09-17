@@ -4,6 +4,7 @@ import glob
 import traceback
 from datetime import datetime
 from dotenv import load_dotenv
+from typing import List
 import logging
 
 # Load environment variables
@@ -285,6 +286,33 @@ class StorageAccount:
             self.logger.error(f"Error listing blobs: {e}")
             return []
     
+    def list_blobs_with_prefix(self, container_name: str, prefix: str) -> List[str]:
+        """
+        List blob names with a specific prefix in a container.
+        
+        Args:
+            container_name: Name of the container
+            prefix: Blob name prefix to filter by
+            
+        Returns:
+            List of blob names (strings)
+        """
+        if not self.azure_available:
+            self.logger.warning("[LIST BLOBS] Azure not available, returning empty list")
+            return []
+        
+        try:
+            container_client = self.blob_service_client.get_container_client(container_name)
+            blobs = container_client.list_blobs(name_starts_with=prefix)
+            
+            blob_names = [blob.name for blob in blobs]
+            self.logger.info(f"[LIST BLOBS] Found {len(blob_names)} blobs with prefix: {prefix}")
+            return blob_names
+            
+        except Exception as e:
+            self.logger.error(f"[LIST BLOBS] Error listing blobs with prefix {prefix}: {e}")
+            return []
+    
     # Backward compatibility methods
     def upload_directory(self, *args, **kwargs):
         return {'successful_uploads': [], 'failed_uploads': [], 'total_files': 0, 'total_size_mb': 0}
@@ -419,9 +447,10 @@ class StorageAccount:
                     f.write(content)
                 return f"local://{local_path}"
             
-            # Create timestamped blob name
+            # Create timestamped blob name with new folder structure
+            date_folder = datetime.now().strftime("%Y%m%d")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            blob_name = f"{blob_prefix}/session_{timestamp}/{filename}"
+            blob_name = f"{date_folder}/flattened/{blob_prefix}/{filename}"
             
             # Upload using existing method
             success = self.upload_blob_content(blob_name, content, overwrite=overwrite)

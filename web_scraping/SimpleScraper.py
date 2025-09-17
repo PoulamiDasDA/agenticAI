@@ -5,6 +5,7 @@ from datetime import datetime
 import time
 import json
 import re
+import os
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,13 +16,27 @@ from unified_scraping_utils import (
 )
 
 class SimpleScraper:
-    def __init__(self):
+    def __init__(self, storage_account=None, container_name="scrapeddata", website="", timestamp="", download_files=False):
         self.scraped_data = []
         self.http_utils = HttpUtils()
         self.html_utils = HtmlUtils()
         self.url_utils = UrlUtils()
         self.metadata_extractor = MetadataExtractor()
         self.skeleton_discovery = SkeletonDiscovery()
+        
+        # For immediate upload functionality
+        self.storage_account = storage_account
+        self.container_name = container_name
+        self.website = website
+        self.timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.date_folder = datetime.now().strftime('%Y%m%d')
+        self.uploaded_pages = []
+        self.upload_enabled = storage_account is not None
+        
+        # For immediate attachment download and upload
+        self.download_files = download_files
+        self.downloaded_files = set()
+        self.failed_downloads = set()
 
     def get_response(self, url):
         """Get HTTP response using unified utility with browser-like headers"""
@@ -54,6 +69,151 @@ class SimpleScraper:
     def is_same_domain(self, url, base_url):
         """Check if URL is from the same domain using unified utility"""
         return self.url_utils.is_same_domain(url, base_url)
+
+    def _upload_page_immediately(self, page_data, page_number):
+        """Upload a single page immediately after scraping"""
+        if not self.upload_enabled:
+            return False
+            
+        try:
+            page_blob_name = f"{self.date_folder}/pages/{self.website}/page_{page_number}.json"
+            
+            page_json = json.dumps(page_data, indent=2, ensure_ascii=False)
+            upload_result = self.storage_account.upload_text_content(
+                container_name=self.container_name,
+                blob_name=page_blob_name,
+                content=page_json,
+                content_type="application/json"
+            )
+            
+            if upload_result.get('status') == 'success':
+                self.uploaded_pages.append({
+                    'blob_name': page_blob_name,
+                    'url': page_data['url'][:100],
+                    'content_size': len(str(page_data['content'])),
+                    'page_number': page_number
+                })
+                logger.info(f"[UPLOAD] Uploaded page {page_number}: {page_data['url'][:50]}...")
+                return True
+            else:
+                logger.error(f"[UPLOAD] Failed to upload page {page_number}: {upload_result.get('error')}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[UPLOAD] Exception uploading page {page_number}: {str(e)}")
+            return False
+
+    def _find_and_upload_attachments(self, soup, page_url, page_number):
+        """Find and immediately upload PDF and document attachments from a page"""
+        if not self.download_files:
+            return []
+            
+        attachments_uploaded = []
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        # Look for PDF and document links
+        attachment_selectors = [
+            'a[href$=".pdf"]',
+            'a[href$=".doc"]', 
+            'a[href$=".docx"]',
+            'a[href$=".xls"]',
+            'a[href$=".xlsx"]',
+            'a[href$=".ppt"]',
+            'a[href$=".pptx"]',
+            'a[href*=".pdf"]',  # PDFs with query parameters
+            'a[href*="download"]',  # Generic download links
+            'a[href*="attachment"]'  # Generic attachment links
+        ]
+        
+        for selector in attachment_selectors:
+            links = soup.select(selector)
+            for link in links:
+                href = link.get('href')
+                if not href:
+                    continue
+                    
+                # Convert relative URLs to absolute
+                attachment_url = urljoin(page_url, href)
+                
+                # Skip if already processed
+                if attachment_url in self.downloaded_files:
+                    continue
+                
+                try:
+                    # Download the attachment
+                    logger.info(f"[ATTACHMENT] Downloading: {attachment_url}")
+                    response = session.get(attachment_url, timeout=30)
+                    response.raise_for_status()
+                    
+                    # Get filename from URL or Content-Disposition header
+                    filename = self._get_filename_from_response(response, attachment_url)
+                    
+                    # Create blob name
+                    attachment_blob_name = f"{self.date_folder}/attachments/{self.website}/page_{page_number}_{filename}"
+                    
+                    # Upload binary content to Azure Storage
+                    upload_result = self.storage_account.upload_blob_content(
+                        container_name=self.container_name,
+                        blob_name=attachment_blob_name,
+                        content=response.content,
+                        content_type=response.headers.get('content-type', 'application/octet-stream')
+                    )
+                    
+                    if upload_result.get('status') == 'success':
+                        attachment_info = {
+                            'filename': filename,
+                            'url': attachment_url,
+                            'blob_name': attachment_blob_name,
+                            'size': len(response.content),
+                            'content_type': response.headers.get('content-type', 'unknown'),
+                            'page_number': page_number,
+                            'source_page': page_url
+                        }
+                        attachments_uploaded.append(attachment_info)
+                        self.downloaded_files.add(attachment_url)
+                        logger.info(f"[ATTACHMENT] ✅ Uploaded: {filename} ({attachment_info['size']} bytes)")
+                    else:
+                        logger.error(f"[ATTACHMENT] ❌ Upload failed: {filename} - {upload_result.get('error')}")
+                        self.failed_downloads.add(attachment_url)
+                        
+                except Exception as e:
+                    logger.error(f"[ATTACHMENT] ❌ Error downloading {attachment_url}: {str(e)}")
+                    self.failed_downloads.add(attachment_url)
+                    
+        return attachments_uploaded
+
+    def _get_filename_from_response(self, response, url):
+        """Extract filename from response headers or URL"""
+        # Try Content-Disposition header first
+        content_disposition = response.headers.get('content-disposition', '')
+        if 'filename=' in content_disposition:
+            filename = content_disposition.split('filename=')[1].strip('"\'')
+            return filename
+            
+        # Fall back to URL path
+        parsed_url = urlparse(url)
+        filename = os.path.basename(parsed_url.path)
+        
+        # If no extension, try to guess from content-type
+        if '.' not in filename:
+            content_type = response.headers.get('content-type', '').lower()
+            if 'pdf' in content_type:
+                filename += '.pdf'
+            elif 'word' in content_type or 'document' in content_type:
+                filename += '.docx'
+            elif 'excel' in content_type or 'spreadsheet' in content_type:
+                filename += '.xlsx'
+            elif 'powerpoint' in content_type or 'presentation' in content_type:
+                filename += '.pptx'
+            else:
+                filename += '.bin'  # Generic binary file
+                
+        # Sanitize filename
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        return filename or f"attachment_{int(time.time())}.bin"
 
     def _detect_site_type(self, base_url):
         """Auto-detect site type using unified utility"""
@@ -668,7 +828,26 @@ class SimpleScraper:
                     'scraped_at': datetime.now().isoformat()
                 }
                 
-                self.scraped_data.append(data)
+                # Process attachments immediately if enabled
+                attachments_uploaded = []
+                if self.download_files:
+                    attachments_uploaded = self._find_and_upload_attachments(soup, url, len(visited) + 1)
+                    if attachments_uploaded:
+                        logger.info(f"[ATTACHMENT] Found and uploaded {len(attachments_uploaded)} attachments from {url}")
+                        data['attachments'] = attachments_uploaded  # Add to page data
+                
+                # Upload immediately if storage is configured
+                page_number = len(visited) + 1  # Current page number
+                upload_success = self._upload_page_immediately(data, page_number)
+                
+                # Only add to scraped_data if upload is disabled OR successful
+                # This saves memory when immediate upload is enabled
+                if not self.upload_enabled or upload_success:
+                    self.scraped_data.append(data)
+                elif self.upload_enabled and not upload_success:
+                    logger.warning(f"[MEMORY] Page {page_number} upload failed, keeping in memory as fallback")
+                    self.scraped_data.append(data)
+                
                 visited.add(url)  # Mark as visited IMMEDIATELY after scraping
                 
                 # Find new links to visit - only if not at max depth

@@ -241,7 +241,7 @@ def load_discovery_results(input_data):
         
         # Create blob path for discovery results
         date_str = datetime.now().strftime('%Y%m%d')
-        blob_path = f"discovery/{date_str}/{website}/discovery_results.json"
+        blob_path = f"{date_str}/discovery/{website}/discovery_results.json"
         
         # Try to download the discovery results
         blob_client = container_client.get_blob_client(blob_path)
@@ -377,7 +377,7 @@ def discover_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
         }
         
         # Upload discovery data directly to Azure Storage
-        discovery_blob_name = f"discovery/{datetime.now().strftime('%Y%m%d')}/{website}/discovery_{timestamp}.json"
+        discovery_blob_name = f"{datetime.now().strftime('%Y%m%d')}/discovery/{website}/discovery_{timestamp}.json"
         container_name = "scrapeddata"  # Use the configured container name
         storage_upload_success = False
         
@@ -440,6 +440,11 @@ def discover_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.activity_trigger(input_name="input_data")
 def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    import json
+    import os
+    from datetime import datetime
+    from StorageAccount import StorageAccount
+    
     try:
         website, discovery_result = input_data['website'], input_data['discovery_result']
         download_files = input_data.get('download_files', False)
@@ -458,9 +463,21 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(f"Unknown website: {website}")
         
         max_depth = WEBSITES[website]['max_depth']
-        scraper = SimpleScraper()
         
-        # First, do the regular scraping
+        # Setup storage for immediate upload during scraping
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        container_name = "scrapeddata"
+        
+        # Initialize scraper with immediate upload capability
+        scraper = SimpleScraper(
+            storage_account=StorageAccount(),
+            container_name=container_name,
+            website=website,
+            timestamp=timestamp,
+            download_files=download_files
+        )
+        
+        # Scrape with immediate upload (data uploads as each page is processed)
         scraped_data = scraper.scrape_website(urls, max_depth)
         
         # Initialize file download results
@@ -587,15 +604,7 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
             except Exception as download_e:
                 logger.error(f"[ACTIVITY SCRAPING] File download error: {str(download_e)}")
                 file_download_result['error'] = str(download_e)
-
-        # Upload scraped data directly to Azure Storage (no local temp files for large datasets)
-        import json
-        import os
-        from datetime import datetime
-        from StorageAccount import StorageAccount
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        container_name = "scrapeddata"  # Use the configured container name
         date_folder = datetime.now().strftime('%Y%m%d')  # Create date-based folder structure
         
         # Upload individual page data and files directly to Azure Storage
@@ -606,30 +615,9 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
             storage = StorageAccount()
             
-            # Upload individual scraped pages
-            for i, (url, content) in enumerate(scraped_data.items(), 1):
-                page_blob_name = f"pages/{date_folder}/{website}/{timestamp}/page_{i}.json"
-                page_data = {
-                    'url': url,
-                    'content': content,
-                    'page_number': i,
-                    'scraping_timestamp': datetime.now().isoformat()
-                }
-                
-                page_json = json.dumps(page_data, indent=2, ensure_ascii=False)
-                upload_result = storage.upload_text_content(
-                    container_name=container_name,
-                    blob_name=page_blob_name,
-                    content=page_json,
-                    content_type="application/json"
-                )
-                
-                if upload_result.get('status') == 'success':
-                    uploaded_pages.append({
-                        'blob_name': page_blob_name,
-                        'url': url[:100],  # Truncate long URLs
-                        'content_size': len(str(content))
-                    })
+            # Note: Individual page uploads are now handled immediately during scraping by SimpleScraper
+            # Count uploaded pages from scraped_data (all pages that were successfully processed)
+            uploaded_pages_count = len(scraped_data) if scraped_data else 0
             
             # Upload downloaded files directly to Azure Storage (if any)
             if download_files and downloaded_files:
@@ -662,11 +650,12 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                         logger.error(f"[ACTIVITY SCRAPING] Failed to upload file {file_info['filename']}: {str(file_e)}")
             
             # Upload summary data
-            summary_blob_name = f"summaries/{date_folder}/{website}/summary_{timestamp}.json"
+            summary_blob_name = f"{date_folder}/summaries/{website}/summary_{timestamp}.json"
             summary_data = {
                 'website': website,
-                'scraped_count': len(scraped_data),
+                'scraped_count': len(scraped_data) if scraped_data else 0,
                 'scraping_timestamp': datetime.now().isoformat(),
+                'scraping_mode': 'immediate_upload',  # Indicate that pages were uploaded immediately
                 'download_files_enabled': download_files,
                 'file_downloads': {
                     'total_downloaded': len(downloaded_files),
@@ -677,16 +666,17 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                         'Word': len([f for f in downloaded_files if f['type'] == 'Word'])
                     }
                 } if download_files else None,
-                'uploaded_pages': len(uploaded_pages),
+                'uploaded_pages': uploaded_pages_count,
                 'uploaded_files': len(uploaded_files),
-                'pages_blob_references': uploaded_pages[:10],  # Sample references
+                'pages_note': 'Pages uploaded immediately during scraping - see pages/ folder',
                 'files_blob_references': uploaded_files[:10],   # Sample references
                 'container_name': container_name,
                 'storage_structure': {
-                    'pages_path': f'pages/{date_folder}/{website}/{timestamp}/',
-                    'attachments_path': f'attachments/{date_folder}/{website}/{timestamp}/',
-                    'discovery_path': f'discovery/{date_folder}/{website}/',
-                    'summary_path': f'summaries/{date_folder}/{website}/'
+                    'pages_path': f'{date_folder}/pages/{website}/',
+                    'attachments_path': f'{date_folder}/attachments/{website}/',
+                    'discovery_path': f'{date_folder}/discovery/{website}/',
+                    'summary_path': f'{date_folder}/summaries/{website}/',
+                    'flattened_path': f'{date_folder}/flattened/{website}/'
                 }
             }
             
@@ -701,19 +691,40 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
             if summary_upload.get('status') == 'success':
                 storage_upload_success = True
                 logger.info(f"[ACTIVITY SCRAPING] All data uploaded to Azure Storage - Pages: {len(uploaded_pages)}, Files: {len(uploaded_files)}")
+                
+                # Add individual page flattening for CBUAE
+                if website == 'cbuae' and len(uploaded_pages) > 0:
+                    try:
+                        logger.info(f"[FLATTENING] Starting individual page flattening for {website}")
+                        from cbuae_processor import CbuaeProcessor
+                        
+                        processor = CbuaeProcessor()
+                        flattened_blobs = processor.flatten_individual_pages_from_session(
+                            date_folder=date_folder,
+                            timestamp=timestamp,
+                            website=website,
+                            storage_account=storage
+                        )
+                        
+                        logger.info(f"[FLATTENING] ✅ Created {len(flattened_blobs)} individual flattened page files")
+                        
+                    except Exception as flatten_e:
+                        logger.error(f"[FLATTENING] ❌ Error during individual page flattening: {str(flatten_e)}")
+                        # Don't fail the whole scraping process if flattening fails
             
         except Exception as upload_e:
             logger.error(f"[ACTIVITY SCRAPING] Azure Storage upload failed: {str(upload_e)}")
 
         result = {
             'status': 'completed', 
-            'scraped_count': len(scraped_data), 
+            'scraped_count': len(scraped_data) if scraped_data else 0, 
             'website': website,
             'uploaded_to_azure': storage_upload_success,
             'container_name': container_name if storage_upload_success else None,
             'summary_blob_name': summary_blob_name if storage_upload_success else None,
-            'uploaded_pages_count': len(uploaded_pages),
-            'uploaded_files_count': len(uploaded_files)
+            'uploaded_pages_count': len(scraped_data) if scraped_data else 0,
+            'uploaded_files_count': len(uploaded_files),
+            'scraping_mode': 'immediate_upload'
         }
         
         # Add file download summary if enabled
@@ -725,13 +736,13 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                 'uploaded_to_azure': len(uploaded_files)
             }
         
-        if len(scraped_data) <= 3:
+        if scraped_data and len(scraped_data) <= 3:
             # Very small datasets - include full data
             result['scraped_data'] = scraped_data
             result['data_included'] = True
         else:
             # Larger datasets - include only summary, full data in Azure Storage
-            sample_urls = list(scraped_data.keys())[:5]
+            sample_urls = [item.get('url', 'Unknown') for item in scraped_data[:5]] if scraped_data else []
             result['scraped_data_summary'] = {
                 'total_entries': len(scraped_data),
                 'sample_urls': sample_urls,
@@ -753,11 +764,12 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                 # Ultra-minimal result for very large payloads
                 result = {
                     'status': 'completed',
-                    'scraped_count': len(scraped_data),
+                    'scraped_count': len(scraped_data) if scraped_data else 0,
                     'website': website,
                     'payload_optimized': True,
                     'original_size_kb': payload_size_kb,
-                    'message': 'Ultra-minimal result - all details in processed files'
+                    'message': 'Ultra-minimal result - all details in processed files',
+                    'scraping_mode': 'immediate_upload'
                 }
                 
                 if download_files:
@@ -784,7 +796,7 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                 'original_error': str(e)
             }
         
-        logger.info(f"[ACTIVITY SCRAPING SUCCESS] Scraped {len(scraped_data)} pages, downloaded {file_download_result['total_downloaded']} files for {website}")
+        logger.info(f"[ACTIVITY SCRAPING SUCCESS] Scraped {len(scraped_data) if scraped_data else 0} pages, downloaded {file_download_result['total_downloaded']} files for {website}")
         return result
 
     except Exception as e:
