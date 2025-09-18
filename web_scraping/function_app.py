@@ -10,7 +10,6 @@ import requests
 from bs4 import BeautifulSoup
 import time
 from urllib.parse import urljoin, urlparse
-from collections import deque
 import hashlib
 
 # Set UTF-8 encoding for Windows
@@ -19,7 +18,6 @@ if sys.platform.startswith('win'):
 
 from main import WEBSITES, get_storage_account, extract_urls_from_structure
 from SimpleScraper import SimpleScraper
-from WebScrapingProcessor import create_processor
 
 # Configure logging with UTF-8 encoding
 logging.basicConfig(
@@ -292,30 +290,7 @@ def load_stored_discovery_data(discovery_filepath: str) -> Dict[str, Any]:
         logger.error(f"Failed to load discovery data from {discovery_filepath}: {str(e)}")
         return {}
 
-def load_stored_scraped_data(scraped_filepath: str) -> Dict[str, Any]:
-    """
-    Load full scraped data from stored file
-    """
-    try:
-        import json
-        with open(scraped_filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load scraped data from {scraped_filepath}: {str(e)}")
-        return {}
 
-def cleanup_temp_files(file_paths: list):
-    """
-    Clean up temporary files after processing is complete
-    """
-    import os
-    for filepath in file_paths:
-        try:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-                logger.info(f"Cleaned up temporary file: {filepath}")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup file {filepath}: {str(e)}")
 
 # ==============================================================================
 # ACTIVITY FUNCTIONS
@@ -615,8 +590,6 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
             storage = StorageAccount()
             
-            # Note: Individual page uploads are now handled immediately during scraping by SimpleScraper
-            # Count uploaded pages from scraped_data (all pages that were successfully processed)
             uploaded_pages_count = len(scraped_data) if scraped_data else 0
             
             # Upload downloaded files directly to Azure Storage (if any)
@@ -624,7 +597,6 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                 for file_info in downloaded_files:
                     file_blob_name = f"attachments/{date_folder}/{website}/{timestamp}/{file_info['filename']}"
                     
-                    # Upload file content directly to Azure Storage
                     try:
                         file_upload_result = storage.upload_blob_content(
                             container_name=container_name,
@@ -692,25 +664,9 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                 storage_upload_success = True
                 logger.info(f"[ACTIVITY SCRAPING] All data uploaded to Azure Storage - Pages: {len(uploaded_pages)}, Files: {len(uploaded_files)}")
                 
-                # Add individual page flattening for CBUAE
-                if website == 'cbuae' and len(uploaded_pages) > 0:
-                    try:
-                        logger.info(f"[FLATTENING] Starting individual page flattening for {website}")
-                        from cbuae_processor import CbuaeProcessor
-                        
-                        processor = CbuaeProcessor()
-                        flattened_blobs = processor.flatten_individual_pages_from_session(
-                            date_folder=date_folder,
-                            timestamp=timestamp,
-                            website=website,
-                            storage_account=storage
-                        )
-                        
-                        logger.info(f"[FLATTENING] ✅ Created {len(flattened_blobs)} individual flattened page files")
-                        
-                    except Exception as flatten_e:
-                        logger.error(f"[FLATTENING] ❌ Error during individual page flattening: {str(flatten_e)}")
-                        # Don't fail the whole scraping process if flattening fails
+                # Note: Individual page flattening is now done immediately during scraping for CBUAE
+                # No need for batch processing at the end
+                logger.info(f"[FLATTENING] Individual page flattening completed during scraping process")
             
         except Exception as upload_e:
             logger.error(f"[ACTIVITY SCRAPING] Azure Storage upload failed: {str(upload_e)}")
@@ -736,21 +692,13 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
                 'uploaded_to_azure': len(uploaded_files)
             }
         
-        if scraped_data and len(scraped_data) <= 3:
-            # Very small datasets - include full data
-            result['scraped_data'] = scraped_data
-            result['data_included'] = True
-        else:
-            # Larger datasets - include only summary, full data in Azure Storage
-            sample_urls = [item.get('url', 'Unknown') for item in scraped_data[:5]] if scraped_data else []
-            result['scraped_data_summary'] = {
-                'total_entries': len(scraped_data),
-                'sample_urls': sample_urls,
-                'has_content': len(scraped_data) > 0,
-                'stored_in_azure': summary_blob_name if storage_upload_success else None,
-                'message': f'Full scraped data for {len(scraped_data)} pages uploaded to Azure Storage'
-            }
-            result['data_included'] = False
+        # Simple result summary - all data already processed and uploaded immediately
+        result['summary'] = {
+            'total_pages_processed': len(scraped_data) if scraped_data else 0,
+            'processing_mode': 'immediate',
+            'all_data_uploaded': storage_upload_success,
+            'message': 'All pages processed and uploaded immediately during scraping'
+        }
         
         # Test payload size to ensure we're under limit
         try:
@@ -803,76 +751,7 @@ def scrape_website(input_data: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"[ACTIVITY SCRAPING ERROR] {str(e)}")
         return {'status': 'failed', 'error': str(e), 'scraped_count': 0, 'scraped_data': {}}
 
-@app.activity_trigger(input_name="input_data")
-def process_scraped_data(input_data: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        website, scraping_result = input_data['website'], input_data['scraping_result']
-        logger.info(f"[ACTIVITY PROCESSING] {website}")
 
-        if scraping_result['status'] != 'completed':
-            raise ValueError("Scraping failed")
-        
-        # Check if scraped data is included directly or stored in file
-        if scraping_result.get('data_included', True):
-            # Data is included in the result
-            scraped_data = scraping_result.get('scraped_data', {})
-        else:
-            # Data is stored in file - load it
-            scraped_filepath = scraping_result.get('scraped_file')
-            if scraped_filepath:
-                logger.info(f"[ACTIVITY PROCESSING] Loading scraped data from: {scraped_filepath}")
-                stored_data = load_stored_scraped_data(scraped_filepath)
-                scraped_data = stored_data.get('scraped_data', {})
-            else:
-                scraped_data = {}
-        
-        if not scraped_data:
-            return {'status': 'completed', 'processed_count': 0, 'saved_files': [], 'message': 'No data'}
-
-        processor = create_processor(website)
-        saved_files = []
-        individual_dir = f"/tmp/{website}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_individual"
-        os.makedirs(individual_dir, exist_ok=True)
-
-        for url, data in scraped_data.items():
-            processed_data = processor.process_single_page(url, data)
-            if processed_data:
-                filename = f"{len(saved_files)+1:04d}_{url.split('/')[-1][:50]}.json"
-                filepath = os.path.join(individual_dir, filename)
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    json.dump(processed_data, f, ensure_ascii=False, indent=2)
-                saved_files.append(filepath)
-
-        summary_file = f"/tmp/{website}_summary.json"
-        processor.save_processed_data(scraped_data, summary_file)
-
-        return {'status': 'completed', 'processed_count': len(saved_files), 'saved_files': saved_files, 'individual_dir': individual_dir, 'summary_file': summary_file, 'website': website}
-
-    except Exception as e:
-        logger.error(f"[ACTIVITY PROCESSING ERROR] {str(e)}")
-        return {'status': 'failed', 'error': str(e), 'processed_count': 0, 'saved_files': []}
-
-@app.activity_trigger(input_name="input_data")
-def upload_to_storage(input_data: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        website, processing_result = input_data['website'], input_data['processing_result']
-        logger.info(f"[ACTIVITY UPLOAD] {website}")
-
-        if processing_result['status'] != 'completed':
-            raise ValueError("Processing failed")
-
-        storage = get_storage_account()
-        upload_results = storage.upload_scraped_data(
-            individual_dir=processing_result['individual_dir'],
-            summary_file=processing_result.get('summary_file'),
-            blob_prefix=f"durable_functions/{website}"
-        )
-
-        return {**upload_results, 'website': website}
-
-    except Exception as e:
-        logger.error(f"[ACTIVITY UPLOAD ERROR] {str(e)}")
-        return {'status': 'failed', 'error': str(e), 'total_successful': 0, 'total_failed': 1}
 
 # ==============================================================================
 # HTTP TRIGGERS - THREE API ENDPOINTS ONLY

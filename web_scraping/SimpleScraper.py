@@ -37,6 +37,9 @@ class SimpleScraper:
         self.download_files = download_files
         self.downloaded_files = set()
         self.failed_downloads = set()
+        
+        # Unique page counter to prevent page number collisions
+        self.page_counter = 0
 
     def get_response(self, url):
         """Get HTTP response using unified utility with browser-like headers"""
@@ -71,12 +74,14 @@ class SimpleScraper:
         return self.url_utils.is_same_domain(url, base_url)
 
     def _upload_page_immediately(self, page_data, page_number):
-        """Upload a single page immediately after scraping"""
+        """Upload a single page immediately after scraping and trigger post-processing"""
         if not self.upload_enabled:
             return False
             
         try:
-            page_blob_name = f"{self.date_folder}/pages/{self.website}/page_{page_number}.json"
+            # Create unique blob name with page number and URL hash to prevent collisions
+            url_hash = hash(page_data.get('url', '')) % 100000  # 5-digit hash
+            page_blob_name = f"{self.date_folder}/pages/{self.website}/page_{page_number}_{url_hash}.json"
             
             page_json = json.dumps(page_data, indent=2, ensure_ascii=False)
             upload_result = self.storage_account.upload_text_content(
@@ -94,6 +99,10 @@ class SimpleScraper:
                     'page_number': page_number
                 })
                 logger.info(f"[UPLOAD] Uploaded page {page_number}: {page_data['url'][:50]}...")
+                
+                # Trigger website-specific post-processing
+                self._post_process_page(page_data, page_number)
+                
                 return True
             else:
                 logger.error(f"[UPLOAD] Failed to upload page {page_number}: {upload_result.get('error')}")
@@ -102,6 +111,27 @@ class SimpleScraper:
         except Exception as e:
             logger.error(f"[UPLOAD] Exception uploading page {page_number}: {str(e)}")
             return False
+
+    def _post_process_page(self, page_data, page_number):
+        """Hook for website-specific post-processing after page upload"""
+        if self.website == 'cbuae':
+            try:
+                logger.info(f"[POST-PROCESS] Calling CBUAE processor for page {page_number}, data type: {type(page_data)}")
+                from cbuae_processor import CbuaeProcessor
+                processor = CbuaeProcessor()
+                processor.process_page_immediately(
+                    page_data=page_data,
+                    page_number=page_number,
+                    date_folder=self.date_folder,
+                    timestamp=self.timestamp,
+                    storage_account=self.storage_account,
+                    container_name=self.container_name
+                )
+            except Exception as e:
+                logger.error(f"[POST-PROCESS] Error in CBUAE post-processing for page {page_number}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        # Add more website-specific processors here as needed
 
     def _find_and_upload_attachments(self, soup, page_url, page_number):
         """Find and immediately upload PDF and document attachments from a page"""
@@ -837,7 +867,8 @@ class SimpleScraper:
                         data['attachments'] = attachments_uploaded  # Add to page data
                 
                 # Upload immediately if storage is configured
-                page_number = len(visited) + 1  # Current page number
+                self.page_counter += 1  # Increment unique page counter
+                page_number = self.page_counter
                 upload_success = self._upload_page_immediately(data, page_number)
                 
                 # Only add to scraped_data if upload is disabled OR successful

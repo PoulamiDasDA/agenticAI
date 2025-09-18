@@ -24,6 +24,60 @@ class CbuaeProcessor:
         self.metadata_extractor = MetadataExtractor()
         self.common_utils = CommonUtils()
 
+    def process_page_immediately(self, page_data: Dict[str, Any], page_number: int, 
+                                date_folder: str, timestamp: str, 
+                                storage_account, container_name: str):
+        """
+        Process a page immediately after it's scraped and uploaded.
+        Generates and uploads flattened JSON for the page.
+        
+        Args:
+            page_data: The scraped page data
+            page_number: Page number for naming
+            date_folder: Date folder (e.g., "20241217")
+            timestamp: Session timestamp (e.g., "20241217_143052")
+            storage_account: StorageAccount instance
+            container_name: Container name for uploads
+        """
+        try:
+            logger.info(f"[CBUAE-PROCESS] Starting immediate processing for page {page_number}")
+            
+            # Debug: Check the type and structure of page_data
+            logger.info(f"[CBUAE-PROCESS] page_data type: {type(page_data)}")
+            if isinstance(page_data, dict):
+                logger.info(f"[CBUAE-PROCESS] page_data keys: {list(page_data.keys())}")
+            else:
+                logger.error(f"[CBUAE-PROCESS] Expected dict, got {type(page_data)}: {str(page_data)[:100]}...")
+                return
+            
+            # Generate flattened data
+            flattened_records = self.flatten_single_page_data(page_data, str(page_number))
+            
+            if flattened_records:
+                # Create unique blob name with page number and URL hash to prevent collisions
+                url_hash = hash(page_data.get('url', '')) % 100000  # 5-digit hash
+                flattened_blob_name = f"{date_folder}/flattened/cbuae/page_{page_number}_{url_hash}_flattened_{timestamp}.json"
+                
+                flattened_json = json.dumps(flattened_records, ensure_ascii=False, indent=2)
+                upload_result = storage_account.upload_text_content(
+                    container_name=container_name,
+                    blob_name=flattened_blob_name,
+                    content=flattened_json,
+                    content_type="application/json"
+                )
+                
+                if upload_result.get('status') == 'success':
+                    logger.info(f"[CBUAE-PROCESS] ✅ Immediately created flattened JSON for page {page_number}: {flattened_blob_name} ({len(flattened_records)} records)")
+                else:
+                    logger.error(f"[CBUAE-PROCESS] ❌ Failed to upload flattened JSON for page {page_number}: {upload_result.get('error')}")
+            else:
+                logger.info(f"[CBUAE-PROCESS] No flattened records generated for page {page_number}")
+                
+        except Exception as e:
+            logger.error(f"[CBUAE-PROCESS] Error in immediate processing for page {page_number}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
     def build_title_hierarchy(self, titles: List[str], main_item_title: str) -> str:
         """
         Build hierarchical title by concatenating all titles starting from main_item_title.
@@ -274,23 +328,443 @@ class CbuaeProcessor:
                 logger.warning(f"[SINGLE PAGE FLATTENING] No content found in page {page_number}")
                 return []
             
-            # Use the existing flattening logic but for single page content
-            flattened_records = self.flatten_cbuae_data_memory(content)
-            
-            # Add page tracking metadata to each record
-            for record in flattened_records:
-                if 'metadata' not in record:
-                    record['metadata'] = {}
-                record['metadata']['source_page_number'] = page_number
-                record['metadata']['source_url'] = page_data.get('url', '')
-                record['metadata']['page_title'] = page_data.get('title', '')
-                record['metadata']['scraped_at'] = page_data.get('scraped_at', '')
-            
-            return flattened_records
+            # Check if this is structured CBUAE data or just HTML content
+            if isinstance(content, dict) and 'main_items' in content:
+                # This is structured CBUAE data, use the existing flattening logic
+                logger.info(f"[SINGLE PAGE FLATTENING] Page {page_number} contains structured CBUAE data - using existing flattening")
+                flattened_records = self.flatten_cbuae_data_memory(content)
+                
+                # Add page tracking metadata to each record
+                for record in flattened_records:
+                    if 'metadata' not in record:
+                        record['metadata'] = {}
+                    record['metadata']['source_page_number'] = page_number
+                    record['metadata']['source_url'] = page_data.get('url', '')
+                    record['metadata']['page_title'] = page_data.get('title', '')
+                    record['metadata']['scraped_at'] = page_data.get('scraped_at', '')
+                    record['metadata']['processing_type'] = 'immediate_structured_data'
+                
+                return flattened_records
+                
+            elif isinstance(content, str):
+                # This is HTML/text content - extract rich CBUAE fields immediately
+                logger.info(f"[SINGLE PAGE FLATTENING] Page {page_number} contains HTML/text content - applying rich field extraction")
+                
+                flattened_record = self._extract_rich_fields_from_html(page_data, page_number)
+                return [flattened_record] if flattened_record else []
+                
+            else:
+                # For other dict structures (non-CBUAE structured data), don't flatten
+                logger.info(f"[SINGLE PAGE FLATTENING] Page {page_number} contains dict content without main_items - preserving original structure")
+                
+                # Return the page data as-is with minimal processing metadata
+                preserved_record = {
+                    'page_number': page_number,
+                    'url': page_data.get('url', ''),
+                    'title': page_data.get('title', ''),
+                    'content': content,
+                    'scraped_at': page_data.get('scraped_at', ''),
+                    'headings': page_data.get('headings', []),
+                    'links': page_data.get('links', []),
+                    'metadata': {
+                        'source_page_number': page_number,
+                        'source_url': page_data.get('url', ''),
+                        'page_title': page_data.get('title', ''),
+                        'scraped_at': page_data.get('scraped_at', ''),
+                        'processing_type': 'preserved_original_structure',
+                        'content_type': type(content).__name__
+                    }
+                }
+                
+                return [preserved_record]
             
         except Exception as e:
             logger.error(f"[SINGLE PAGE FLATTENING] Error processing page {page_number}: {str(e)}")
             return []
+
+    def _extract_rich_fields_from_html(self, page_data: Dict[str, Any], page_number: str) -> Dict[str, Any]:
+        """
+        Extract rich CBUAE fields directly from HTML content for immediate processing
+        """
+        try:
+            url = page_data.get('url', '')
+            title = page_data.get('title', '')
+            content_raw = page_data.get('content', '')
+            headings = page_data.get('headings', [])
+            
+            # Handle different content types
+            content_html = ""
+            content_links = []
+            
+            if isinstance(content_raw, str):
+                # Simple text content
+                content_html = content_raw
+                logger.info(f"[RICH EXTRACTION] Page {page_number} has string content (length: {len(content_raw)})")
+                
+            elif isinstance(content_raw, dict):
+                # Content with structured data (possibly includes links)
+                logger.info(f"[RICH EXTRACTION] Page {page_number} has dict content with keys: {list(content_raw.keys())}")
+                
+                # Try different ways to extract text and links from dict
+                if 'text' in content_raw:
+                    content_html = content_raw['text']
+                elif 'content' in content_raw:
+                    content_html = content_raw['content']
+                elif 'body_text' in content_raw:
+                    content_html = content_raw['body_text']
+                else:
+                    # If no obvious text field, convert entire dict to string
+                    content_html = str(content_raw)
+                
+                # Extract links if available
+                if 'links' in content_raw:
+                    content_links = content_raw['links']
+                elif 'urls' in content_raw:
+                    content_links = content_raw['urls']
+                elif 'references' in content_raw:
+                    content_links = content_raw['references']
+                    
+                # Log the structure for debugging
+                if content_links:
+                    logger.info(f"[RICH EXTRACTION] Page {page_number} contains {len(content_links)} links in content")
+                    
+            else:
+                logger.warning(f"[RICH EXTRACTION] Page {page_number} has unexpected content type: {type(content_raw)}")
+                content_html = str(content_raw)
+            
+            # Parse HTML content with BeautifulSoup for field extraction
+            soup = None
+            try:
+                from bs4 import BeautifulSoup
+                if content_html and '<' in content_html:  # Check if it looks like HTML
+                    soup = BeautifulSoup(content_html, 'html.parser')
+            except Exception as soup_e:
+                logger.warning(f"[RICH EXTRACTION] Failed to parse HTML for page {page_number}: {str(soup_e)}")
+            
+            # Extract rich CBUAE fields
+            rich_record = {
+                # Basic fields
+                'page_number': page_number,
+                'url': url,
+                'title': title,
+                'scraped_at': page_data.get('scraped_at', ''),
+                
+                # Extract regulation-specific fields
+                'circular_number': self._extract_circular_number(soup, title, url),
+                'effective_date': self._extract_effective_date(soup, content_html),
+                'regulation_section': self._extract_regulation_section(url, title),
+                'hierarchy': self._build_hierarchy_from_url(url, title),
+                'document_type': self._classify_document_type(title, url),
+                
+                # Content fields - full content only
+                'content': content_html,  # Full content
+                'key_topics': self._extract_key_topics(content_html, headings),
+                'regulatory_terms': self._extract_regulatory_terms(content_html),
+                
+                # Structural information
+                'headings': headings,
+                'headings_count': len(headings),
+                'content_length': len(content_html),
+                'depth': page_data.get('depth', 0),
+                
+                # Links information (from both page_data and content)
+                'page_links': page_data.get('links', []),
+                'page_links_count': len(page_data.get('links', [])),
+                'content_links': content_links,
+                'content_links_count': len(content_links),
+                'total_links_count': len(page_data.get('links', [])) + len(content_links),
+                
+                # Metadata
+                'metadata': {
+                    'source_page_number': page_number,
+                    'source_url': url,
+                    'page_title': title,
+                    'scraped_at': page_data.get('scraped_at', ''),
+                    'processing_type': 'immediate_rich_extraction',
+                    'content_type': type(content_raw).__name__,
+                    'has_structured_content': isinstance(content_raw, dict),
+                    'has_content_links': len(content_links) > 0
+                }
+            }
+            
+            # Add attachment info if available
+            if 'attachments' in page_data:
+                rich_record['attachments'] = page_data['attachments']
+                rich_record['attachments_count'] = len(page_data['attachments'])
+            else:
+                rich_record['attachments_count'] = 0
+                
+            return rich_record
+            
+        except Exception as e:
+            logger.error(f"[RICH EXTRACTION] Error extracting rich fields from page {page_number}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to simple record
+            return {
+                'page_number': page_number,
+                'url': page_data.get('url', ''),
+                'title': page_data.get('title', ''),
+                'error': f"Rich extraction failed: {str(e)}",
+                'processing_type': 'fallback_simple',
+                'content_type_received': type(page_data.get('content', '')).__name__
+            }
+
+    def _extract_circular_number(self, soup, title: str, url: str) -> str:
+        """Extract circular/regulation number from content"""
+        import re
+        
+        # Look for patterns like "CBUAE/BSD/2021/123" or "Circular No. 123/2021"
+        patterns = [
+            r'CBUAE/[A-Z]{2,4}/\d{4}/\d+',
+            r'Circular\s+No\.?\s*\d+/\d{4}',
+            r'Regulation\s+No\.?\s*\d+\.?\d*\.?\d*',
+            r'Notice\s+No\.?\s*\d+/\d{4}'
+        ]
+        
+        # Combine text from different sources
+        text_sources = []
+        if soup:
+            text_sources.append(soup.get_text())
+        
+        if title:
+            # Ensure title is a string
+            if isinstance(title, dict):
+                title_text = title.get('text', '') or title.get('title', '') or str(title)
+            else:
+                title_text = str(title)
+            text_sources.append(title_text)
+            
+        if url:
+            # Ensure url is a string
+            if isinstance(url, dict):
+                url_text = url.get('url', '') or url.get('link', '') or str(url)
+            else:
+                url_text = str(url)
+            text_sources.append(url_text)
+            
+        text = " ".join(text_sources)
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(0)
+        return ""
+
+    def _extract_effective_date(self, soup, content: str) -> str:
+        """Extract effective date from content"""
+        import re
+        
+        # Look for date patterns
+        text_sources = []
+        if soup:
+            text_sources.append(soup.get_text())
+        
+        if content:
+            # Ensure content is a string
+            if isinstance(content, dict):
+                content_text = content.get('text', '') or content.get('content', '') or content.get('body_text', '') or str(content)
+            elif isinstance(content, str):
+                content_text = content
+            else:
+                content_text = str(content)
+            text_sources.append(content_text)
+            
+        text = " ".join(text_sources)
+        
+        date_patterns = [
+            r'effective\s+(?:from\s+)?(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+            r'effective\s+date[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+            r'comes?\s+into\s+effect\s+(?:on\s+)?(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        ]
+        
+        for pattern in date_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return ""
+
+    def _extract_regulation_section(self, url: str, title: str) -> str:
+        """Extract regulation section from URL or title"""
+        import re
+        
+        # Ensure inputs are strings
+        if isinstance(url, dict):
+            url_text = url.get('url', '') or url.get('link', '') or str(url)
+        else:
+            url_text = str(url) if url else ""
+            
+        if isinstance(title, dict):
+            title_text = title.get('text', '') or title.get('title', '') or str(title)
+        else:
+            title_text = str(title) if title else ""
+        
+        # Extract section from URL path like /section-1-2-3/
+        section_match = re.search(r'/section[_-]?([\d\-\.]+)', url_text)
+        if section_match:
+            return f"Section {section_match.group(1).replace('-', '.')}"
+            
+        # Look for section in title
+        section_match = re.search(r'section\s+([\d\.]+)', title_text, re.IGNORECASE)
+        if section_match:
+            return f"Section {section_match.group(1)}"
+            
+        return ""
+
+    def _build_hierarchy_from_url(self, url: str, title: str) -> str:
+        """Build hierarchy from URL structure"""
+        from urllib.parse import urlparse
+        
+        # Ensure inputs are strings
+        if isinstance(url, dict):
+            url_text = url.get('url', '') or url.get('link', '') or str(url)
+        else:
+            url_text = str(url) if url else ""
+            
+        if isinstance(title, dict):
+            title_text = title.get('text', '') or title.get('title', '') or str(title)
+        else:
+            title_text = str(title) if title else ""
+        
+        try:
+            parsed = urlparse(url_text)
+            path_parts = [part for part in parsed.path.split('/') if part and part != 'en']
+            
+            # Clean up path parts and create hierarchy
+            hierarchy_parts = []
+            for part in path_parts[:4]:  # Limit depth
+                clean_part = part.replace('-', ' ').replace('_', ' ').title()
+                hierarchy_parts.append(clean_part)
+                
+            if title_text and title_text not in hierarchy_parts:
+                hierarchy_parts.append(title_text)
+                
+            return " | ".join(hierarchy_parts)
+        except Exception:
+            # Fallback if URL parsing fails
+            return title_text if title_text else ""
+
+    def _classify_document_type(self, title: str, url: str) -> str:
+        """Classify the type of document"""
+        # Ensure inputs are strings
+        if isinstance(title, dict):
+            title_text = title.get('text', '') or title.get('title', '') or str(title)
+        else:
+            title_text = str(title) if title else ""
+            
+        if isinstance(url, dict):
+            url_text = url.get('url', '') or url.get('link', '') or str(url)
+        else:
+            url_text = str(url) if url else ""
+        
+        text = (title_text + " " + url_text).lower()
+        
+        if 'circular' in text:
+            return 'Circular'
+        elif 'regulation' in text:
+            return 'Regulation'
+        elif 'notice' in text:
+            return 'Notice'
+        elif 'guidance' in text:
+            return 'Guidance'
+        elif 'standard' in text:
+            return 'Standard'
+        elif 'rulebook' in text:
+            return 'Rulebook'
+        else:
+            return 'General'
+
+    def _create_content_summary(self, content: str) -> str:
+        """Create a summary of the content"""
+        if not content:
+            return ""
+        
+        # Ensure content is a string
+        if isinstance(content, dict):
+            # If content is a dict, try to extract text from common keys
+            content_text = content.get('text', '') or content.get('content', '') or content.get('body_text', '') or str(content)
+        elif isinstance(content, str):
+            content_text = content
+        else:
+            content_text = str(content)
+        
+        # Take first 300 characters, break at word boundary
+        summary = content_text[:300]
+        if len(content_text) > 300:
+            last_space = summary.rfind(' ')
+            if last_space > 200:
+                summary = summary[:last_space] + "..."
+        
+        return summary.strip()
+
+    def _extract_key_topics(self, content: str, headings: list) -> list:
+        """Extract key topics from content and headings"""
+        import re
+        
+        topics = set()
+        
+        # Add cleaned headings as topics
+        for heading in headings[:10]:  # Limit to first 10 headings
+            # Ensure heading is a string
+            if isinstance(heading, dict):
+                # If heading is a dict, try to extract text from common keys
+                heading_text = heading.get('text', '') or heading.get('title', '') or str(heading)
+            elif isinstance(heading, str):
+                heading_text = heading
+            else:
+                heading_text = str(heading)
+            
+            clean_heading = re.sub(r'^\d+\.?\s*', '', heading_text).strip()
+            if len(clean_heading) > 3 and len(clean_heading) < 100:
+                topics.add(clean_heading)
+        
+        # Extract key regulatory terms as topics
+        regulatory_keywords = [
+            'capital requirement', 'risk management', 'compliance', 'reporting',
+            'disclosure', 'supervision', 'governance', 'operational risk',
+            'credit risk', 'market risk', 'liquidity', 'basel', 'ifrs'
+        ]
+        
+        content_lower = content.lower()
+        for keyword in regulatory_keywords:
+            if keyword in content_lower:
+                topics.add(keyword.title())
+        
+        return list(topics)[:10]  # Limit to 10 topics
+
+    def _extract_regulatory_terms(self, content: str) -> list:
+        """Extract specific regulatory terms from content"""
+        import re
+        
+        if not content:
+            return []
+        
+        # Ensure content is a string
+        if isinstance(content, dict):
+            # If content is a dict, try to extract text from common keys
+            content_text = content.get('text', '') or content.get('content', '') or content.get('body_text', '') or str(content)
+        elif isinstance(content, str):
+            content_text = content
+        else:
+            content_text = str(content)
+            
+        # Define regulatory term patterns
+        term_patterns = [
+            r'\b(?:CAR|Capital Adequacy Ratio)\b',
+            r'\b(?:IFRS|International Financial Reporting Standards)\b',
+            r'\b(?:Basel III|Basel II)\b',
+            r'\b(?:AML|Anti-Money Laundering)\b',
+            r'\b(?:KYC|Know Your Customer)\b',
+            r'\b(?:PCI DSS)\b',
+            r'\b(?:GDPR)\b'
+        ]
+        
+        terms = set()
+        for pattern in term_patterns:
+            matches = re.findall(pattern, content_text, re.IGNORECASE)
+            terms.update(matches)
+            
+        return list(terms)[:10]  # Limit to 10 terms
 
     def flatten_cbuae_data_memory(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
