@@ -249,13 +249,6 @@ class WebScrapingProcessor:
             'filtered_files': filtered_out_files
         }
         
-        # Save summary file
-        summary_filename = f"{self.filename_prefix}_summary_{self.timestamp}.json"
-        summary_file = os.path.join("scraped_data", summary_filename)
-        
-        with open(summary_file, 'w', encoding='utf-8') as f:
-            json.dump(summary_data, f, ensure_ascii=False, indent=2)
-        
         # Store for instance access
         self.saved_files = saved_files
         self.filtered_out_files = filtered_out_files
@@ -264,10 +257,28 @@ class WebScrapingProcessor:
         logger.info(f"[PROCESSING SUMMARY] Processing Summary:")
         logger.info(f"[PROCESSING SUMMARY]   Files saved: {len(saved_files)}/{len(scraped_data)}")
         logger.info(f"[PROCESSING SUMMARY]   Files filtered out: {len(filtered_out_files)}")
-        logger.info(f"[PROCESSING SUMMARY]   Summary index: {summary_file}")
         logger.info(f"[PROCESSING SUMMARY]   Total size: {summary_data['statistics']['total_file_size_kb']:.1f} KB")
         
-        return saved_files, summary_file, individual_dir
+        return saved_files, individual_dir
+
+    def create_summary_for_status(self):
+        """Create summary data for status checking (in-memory only)"""
+        if not hasattr(self, 'saved_files') or not hasattr(self, 'filtered_out_files'):
+            return None
+            
+        summary_data = {
+            'statistics': {
+                'total_files_processed': len(self.saved_files) + len(self.filtered_out_files),
+                'files_saved': len(self.saved_files),
+                'files_filtered_out': len(self.filtered_out_files),
+                'total_file_size_kb': sum(f['file_size_kb'] for f in self.saved_files),
+                'total_word_count': sum(f['word_count'] for f in self.saved_files)
+            },
+            'saved_files': self.saved_files,
+            'filtered_files': self.filtered_out_files
+        }
+        
+        return summary_data
 
     def _should_filter_content(self, document):
         """Determine if content should be filtered out"""
@@ -289,63 +300,7 @@ class WebScrapingProcessor:
         
         return False
 
-    # Blob-based processing functions using Storage_Account
-    def process_skeleton_to_full(self, input_blob: str, output_prefix: str, 
-                                output_filename: str, section_name: str) -> str:
-        """Process skeleton data to full data using blob storage"""
-        storage = self._get_storage_account()
-        
-        return storage.process_with_blob_storage(
-            self.process_skeleton_to_full_data, 
-            input_blob, output_prefix, output_filename, 
-            section_name
-        )
 
-    def fix_empty_body_versions(self, input_blob: str, output_prefix: str, 
-                               output_filename: str) -> str:
-        """Fix empty body versions using blob storage"""
-        storage = self._get_storage_account()
-        
-        return storage.process_with_blob_storage(
-            self.fix_empty_body_versions_data, 
-            input_blob, output_prefix, output_filename
-        )
-
-    def add_circular_metadata(self, input_blob: str, output_prefix: str, 
-                             output_filename: str, section_name: str) -> str:
-        """Add circular metadata using blob storage"""
-        storage = self._get_storage_account()
-        
-        return storage.process_with_blob_storage(
-            self.site_processor.add_circular_metadata_to_data, 
-            input_blob, output_prefix, output_filename, 
-            section_name
-        )
-
-    def update_latest_flags(self, input_blob: str, output_prefix: str, 
-                           output_filename: str) -> str:
-        """Update latest flags using blob storage"""
-        storage = self._get_storage_account()
-        
-        return storage.process_with_blob_storage(
-            self.update_latest_flags_data, 
-            input_blob, output_prefix, output_filename
-        )
-
-    def process_skeleton_to_full_data(self, skeleton_data, section_name):
-        """Process skeleton data to full data in memory"""
-        # Generic skeleton to full data processing
-        return skeleton_data
-
-    def fix_empty_body_versions_data(self, data):
-        """Fix empty body versions in memory"""
-        # Generic fix for empty body versions
-        return data
-
-    def update_latest_flags_data(self, data):
-        """Update latest flags in memory"""
-        # Generic update of latest flags
-        return data
 
 
 # Factory function to create processor with site-specific functionality

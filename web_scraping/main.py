@@ -1,13 +1,22 @@
-# Cell 1: Configuration and Imports
+# Cell 1: Imports and Setup
 import os
 import json
 from datetime import datetime
-from dotenv import load_dotenv
 import signal
 import sys
-import logging
 import threading
 import time
+
+# Import configuration
+from config import (
+    setup_logging, 
+    STORAGE_CONFIG, 
+    PROCESSING_CONFIG,
+    HEALTH_CONFIG,
+    get_website_config,
+    validate_config,
+    print_config_summary
+)
 
 # Import our consolidated modules
 from SimpleScraper import SimpleScraper
@@ -15,41 +24,8 @@ from WebScrapingProcessor import create_processor
 from StorageAccount import StorageAccount  # Import class directly
 from unified_scraping_utils import SkeletonDiscovery
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging for containers
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
-
-STORAGE_CONFIG = {
-    'account_name': os.getenv("AZURE_STORAGE_ACCOUNT_NAME", "explorationstorage12"),
-    'container_name': os.getenv("AZURE_STORAGE_CONTAINER_NAME", "data"),
-    'credential_type': os.getenv("AZURE_CREDENTIAL_TYPE", "AAD")  # Use environment variable
-}
-
-WEBSITES = {
-    'cbuae': {
-        'url': 'https://rulebook.centralbank.ae/en',
-        'name': 'Central Bank UAE',
-        'type': 'specialized',
-        'max_depth': 2,
-        'filters': ['insurance'] 
-    },
-    'generic': {
-        'url': 'https://example.com',
-        'name': 'Generic Website',
-        'type': 'generic',
-        'max_depth': 1,
-        'filters': []
-    }
-}
+# Setup logging using configuration
+logger = setup_logging()
 
 def get_storage_account():
     """Get existing storage account instance"""
@@ -80,56 +56,58 @@ def create_health_server():
         async def health_check():
             return {
                 "status": "healthy", 
-                "service": "cbuae-scraper",
+                "service": HEALTH_CONFIG['service_name'],
                 "timestamp": datetime.now().isoformat()
             }
         
         @app.get("/")
         async def root():
             return {
-                "message": "CBUAE Scraper is running", 
+                "message": f"{HEALTH_CONFIG['service_name']} is running", 
                 "status": "active",
                 "timestamp": datetime.now().isoformat()
             }
         
         def run_server():
-            uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+            uvicorn.run(
+                app, 
+                host=HEALTH_CONFIG['host'], 
+                port=HEALTH_CONFIG['port'], 
+                log_level="info"
+            )
         
         server_thread = threading.Thread(target=run_server, daemon=True)
         server_thread.start()
-        logger.info("Health check server started on port 8000")
+        logger.info(f"Health check server started on {HEALTH_CONFIG['host']}:{HEALTH_CONFIG['port']}")
         
     except ImportError:
         logger.warning("FastAPI not available, skipping health check server")
 
 # Cell 2: Main Processing Function
-def process_website(website_key='cbuae', processing_mode='full'):
+def process_website_config(website_config, processing_mode='full'):
     """
-    Main function to process websites with specialized handling
+    Main function to process websites with direct configuration
     
     Args:
-        website_key: Key from WEBSITES config ('cbuae', 'generic')
+        website_config: Dictionary with website configuration
+                       {url, name, max_depth, filters}
         processing_mode: 'discovery', 'scraping', 'full'
     """
     
-    # Get website configuration
-    if website_key not in WEBSITES:
-        raise ValueError(f"Unknown website: {website_key}. Available: {list(WEBSITES.keys())}")
+    # Extract configuration
+    base_url = website_config['url']
+    website_name = website_config['name']
+    max_depth = website_config.get('max_depth', 3)
+    filters = website_config.get('filters', [])
     
-    config = WEBSITES[website_key]
-    base_url = config['url']
-    site_type = config['type']
-    max_depth = config['max_depth']
-    filters = config['filters']
-    
-    logger.info(f"[PROCESSING] Processing {config['name']} ({site_type} mode)")
+    logger.info(f"[PROCESSING] Processing {website_name}")
     logger.info(f"[PROCESSING] Base URL: {base_url}")
     logger.info(f"[PROCESSING] Max depth: {max_depth}")
     logger.info(f"[PROCESSING] Filters: {filters}")
     
-    # Initialize components based on site type
+    # Initialize components (simplified - no site type distinction)
     scraper = SimpleScraper()
-    processor = create_processor(site_type, config['name'].lower().replace(' ', '_'))
+    processor = create_processor("generic", website_name.lower().replace(' ', '_'))
     
     results = {}
     
@@ -137,27 +115,11 @@ def process_website(website_key='cbuae', processing_mode='full'):
     if processing_mode in ['discovery', 'full']:
         logger.info(f"[PHASE 1] Site Structure Discovery")
         
-        if site_type == 'specialized':
-            # Use hierarchical discovery for specialized sites
-            discovered_structure = scraper.discover_site_skeleton_hierarchical(
-                base_url, 
-                max_depth=max_depth, 
-                site_type=site_type
-            )
-        else:
-            # Use basic discovery for generic sites
-            discovered_urls = scraper.discover_site_skeleton(base_url, max_depth)
-            discovered_structure = {
-                'main_title': f"{config['name']} Navigation",
-                'main_items': [
-                    {
-                        'main_item_title': info.get('title', 'Unknown'),
-                        'main_item_url': url,
-                        'sub_item_section': []
-                    }
-                    for url, info in discovered_urls.items()
-                ]
-            }
+        # Use unified hierarchical discovery (auto-detection)
+        discovered_structure = scraper.discover_site_skeleton_hierarchical(
+            base_url, 
+            max_depth=max_depth
+        )
         
         # Apply filters
         if filters:
@@ -166,7 +128,7 @@ def process_website(website_key='cbuae', processing_mode='full'):
         
         # Save discovery results
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        discovery_file = f"scraped_data/{config['name'].lower().replace(' ', '_')}_discovery_{timestamp}.json"
+        discovery_file = f"scraped_data/{website_name.lower().replace(' ', '_')}_discovery_{timestamp}.json"
         os.makedirs("scraped_data", exist_ok=True)
         
         with open(discovery_file, 'w', encoding='utf-8') as f:
@@ -186,14 +148,9 @@ def process_website(website_key='cbuae', processing_mode='full'):
         if 'discovery' in results:
             urls_to_scrape = extract_urls_from_structure(results['discovery']['structure'])
         else:
-            # Fallback: basic URL discovery
-            discovered_urls = scraper.discover_site_skeleton(base_url, max_depth=1)
-            if filters:
-                discovered_urls = {
-                    url: info for url, info in discovered_urls.items() 
-                    if not any(filter_term.lower() in url.lower() for filter_term in filters)
-                }
-            urls_to_scrape = list(discovered_urls.keys())
+            # Fallback: use hierarchical discovery
+            discovered_structure = scraper.discover_site_skeleton_hierarchical(base_url, max_depth=1)
+            urls_to_scrape = extract_urls_from_structure(discovered_structure)
         
         logger.info(f"[SCRAPING] Scraping {len(urls_to_scrape)} URLs")
         
@@ -206,21 +163,20 @@ def process_website(website_key='cbuae', processing_mode='full'):
             'count': len(scraped_data)
         }
     
-    # Step 3: Specialized Processing
+    # Step 3: Content Processing
     if processing_mode == 'full' and 'scraping' in results:
-        logger.info(f"[PHASE 3] Specialized Processing")
+        logger.info(f"[PHASE 3] Content Processing")
         
-       
         if isinstance(scraped_data, list):
             scraped_data = {item['url']: item for item in results['scraping']['data'] if 'url' in item}
  
-        # Process scraped data using the appropriate processor
-        saved_files, summary_file, individual_dir = processor.save_processed_data(
+        # Process scraped data using the processor
+        saved_files, individual_dir = processor.save_processed_data(
             scraped_data
         )
         
-        # For CBUAE, apply additional specialized processing
-        if site_type == 'specialized' and website_key == 'cbuae':
+        # Apply any website-specific processing based on URL patterns
+        if 'cbuae' in base_url.lower():
             logger.info(f"[CBUAE] Applying CBUAE-specific processing...")
             
             # Load the saved data for processing
@@ -253,11 +209,24 @@ def process_website(website_key='cbuae', processing_mode='full'):
         
         results['processing'] = {
             'saved_files': saved_files,
-            'summary_file': summary_file,
             'individual_dir': individual_dir
         }
     
     return results
+
+def process_website(processing_mode='full', website_key=None):
+    """
+    Process website using environment configuration only
+    
+    Args:
+        processing_mode: 'discovery', 'scraping', 'full'
+        website_key: Specific website key to process (None for default)
+    """
+    
+    # Get environment config (required)
+    website_config = get_website_config(website_key)
+    logger.info(f"[CONFIG] Using website: {website_config['key']} - {website_config['name']}")
+    return process_website_config(website_config, processing_mode)
 
 # Cell 3: Helper Functions
 def apply_filters(structure, filters):
@@ -312,7 +281,7 @@ def extract_urls_from_structure(structure):
     return list(set(urls))  # Remove duplicates
 
 # Cell 4: Azure Upload Function
-def upload_to_azure(results, website_key='cbuae'):
+def upload_to_azure(results, website_key=None):
     """Upload processing results to your existing Azure Storage"""
     
     if 'processing' not in results:
@@ -320,7 +289,6 @@ def upload_to_azure(results, website_key='cbuae'):
         return {
             'session_prefix': 'no_processing_data',
             'individual_files': {'successful_uploads': [], 'failed_uploads': []},
-            'summary_files': {'successful_uploads': [], 'failed_uploads': []},
             'total_successful': 0,
             'total_failed': 0,
             'total_size_mb': 0,
@@ -328,11 +296,20 @@ def upload_to_azure(results, website_key='cbuae'):
         }
     
     try:
+        # Get website configuration for container name
+        website_config = get_website_config(website_key)
+        
         # Use your existing storage account
         storage = get_storage_account()
         
+        # Use website-specific folder within the main container
+        container_name = STORAGE_CONFIG['container_name']
+        folder_name = website_config.get('folder_name', website_config['key'])
+        
         logger.info(f"[STORAGE] Using existing storage: {STORAGE_CONFIG['account_name']}")
-        logger.info(f"[STORAGE] Container: {STORAGE_CONFIG['container_name']}")
+        logger.info(f"[STORAGE] Container: {container_name}")
+        logger.info(f"[STORAGE] Website folder: {folder_name}")
+        logger.info(f"[STORAGE] Website: {website_config['key']} - {website_config['name']}")
         logger.info(f"[STORAGE] Authentication: {STORAGE_CONFIG['credential_type']}")
         logger.info(f"[STORAGE] Azure Available: {storage.azure_available}")
         
@@ -341,23 +318,22 @@ def upload_to_azure(results, website_key='cbuae'):
             return {
                 'session_prefix': 'local_only',
                 'individual_files': {'successful_uploads': [], 'failed_uploads': []},
-                'summary_files': {'successful_uploads': [], 'failed_uploads': []},
                 'total_successful': 0,
                 'total_failed': 0,
                 'total_size_mb': 0,
                 'status': 'local_fallback'
             }
         
-        config = WEBSITES[website_key]
-        blob_prefix = config['name'].lower().replace(' ', '_')
+        # Create folder structure: website/date/session_id
+        folder_name = website_config.get('folder_name', website_config['key'])
         
         logger.info(f"[UPLOAD] Uploading to Azure Storage...")
+        logger.info(f"[UPLOAD] Folder structure: {folder_name}/YYYY-MM-DD/session_id")
         
         # Upload the scraped data to your existing storage
         upload_results = storage.upload_scraped_data(
             individual_dir=results['processing']['individual_dir'],
-            summary_file=results['processing']['summary_file'],
-            blob_prefix=blob_prefix
+            blob_prefix=folder_name
         )
         
         # Ensure we always return a valid structure
@@ -365,7 +341,6 @@ def upload_to_azure(results, website_key='cbuae'):
             return {
                 'session_prefix': 'upload_error',
                 'individual_files': {'successful_uploads': [], 'failed_uploads': []},
-                'summary_files': {'successful_uploads': [], 'failed_uploads': []},
                 'total_successful': 0,
                 'total_failed': 1,
                 'total_size_mb': 0,
@@ -377,7 +352,6 @@ def upload_to_azure(results, website_key='cbuae'):
         logger.info(f"[UPLOAD SUMMARY] Upload Summary:")
         logger.info(f"[UPLOAD SUMMARY]   Session: {upload_results.get('session_prefix', 'unknown')}")
         logger.info(f"[UPLOAD SUMMARY]   Individual files: {len(upload_results.get('individual_files', {}).get('successful_uploads', []))}")
-        logger.info(f"[UPLOAD SUMMARY]   Summary files: {len(upload_results.get('summary_files', {}).get('successful_uploads', []))}")
         logger.info(f"[UPLOAD SUMMARY]   Failed uploads: {upload_results.get('total_failed', 0)}")
         logger.info(f"[UPLOAD SUMMARY]   Total size: {upload_results.get('total_size_mb', 0):.2f} MB")
         logger.info(f"[UPLOAD SUMMARY]   Status: {upload_results.get('status', 'completed')}")
@@ -391,7 +365,6 @@ def upload_to_azure(results, website_key='cbuae'):
         return {
             'session_prefix': 'exception_error',
             'individual_files': {'successful_uploads': [], 'failed_uploads': []},
-            'summary_files': {'successful_uploads': [], 'failed_uploads': []},
             'total_successful': 0,
             'total_failed': 1,
             'total_size_mb': 0,
@@ -400,10 +373,13 @@ def upload_to_azure(results, website_key='cbuae'):
         }
 
 # Cell 5: CBUAE Data Flattening - Using existing storage
-def flatten_cbuae_data(website_key='cbuae'):
+def flatten_cbuae_data():
     """Apply CBUAE-specific data flattening using your existing storage"""
     
-    if website_key != 'cbuae':
+    # Get website configuration from environment
+    website_config = get_website_config()
+    
+    if 'cbuae' not in website_config['name'].lower():
         logger.warning("[WARNING] Data flattening only available for CBUAE")
         return None
     
@@ -412,7 +388,7 @@ def flatten_cbuae_data(website_key='cbuae'):
         processor = create_processor('specialized', 'cbuae')
         storage = get_storage_account()
         
-        logger.info(f"[FLATTENING] Starting CBUAE data flattening...")
+        logger.info("[FLATTENING] Starting CBUAE data flattening...")
         logger.info(f"[FLATTENING] Using storage: {STORAGE_CONFIG['account_name']}")
         
         if not storage.azure_available:
@@ -467,36 +443,32 @@ def main():
     """Main execution function with container support"""
     
     logger.info("[STARTUP] Web Scraping Pipeline Started")
-    logger.info("=" * 50)
     
     # Start health server for containers
     create_health_server()
     
-    # Configuration - can be overridden by environment variables
-    website = os.getenv('SCRAPING_WEBSITE', 'cbuae')
-    mode = os.getenv('SCRAPING_MODE', 'full')
-    upload_to_cloud = os.getenv('UPLOAD_TO_CLOUD', 'true').lower() == 'true'
-    flatten_data = os.getenv('FLATTEN_DATA', 'true').lower() == 'true'
+    # Use configuration from config.py
+    mode = PROCESSING_CONFIG['default_mode']
+    default_website_key = PROCESSING_CONFIG['default_website']
+    upload_to_cloud = PROCESSING_CONFIG['upload_to_cloud']
+    flatten_data = PROCESSING_CONFIG['flatten_data']
     
-    # Display configuration
-    logger.info(f"[CONFIG] Storage Account: {STORAGE_CONFIG['account_name']}")
-    logger.info(f"[CONFIG] Container: {STORAGE_CONFIG['container_name']}")
-    logger.info(f"[CONFIG] Authentication: {STORAGE_CONFIG['credential_type']}")
-    logger.info(f"[CONFIG] Website: {website}")
-    logger.info(f"[CONFIG] Mode: {mode}")
+    # Print comprehensive configuration summary
+    print_config_summary(logger)
     
     try:
         # Step 1: Process the website
-        results = process_website(website, mode)
+        results = process_website(mode, default_website_key)
         
         # Step 2: Upload to your existing Azure Storage (optional)
         if upload_to_cloud and 'processing' in results:
-            upload_results = upload_to_azure(results, website)
+            upload_results = upload_to_azure(results, default_website_key)
             results['upload'] = upload_results
         
         # Step 3: Flatten data for CBUAE using existing storage (optional)
-        if flatten_data and website == 'cbuae' and upload_to_cloud and results.get('upload', {}).get('total_successful', 0) > 0:
-            flattened_blob = flatten_cbuae_data(website)
+        website_config = get_website_config(default_website_key)
+        if flatten_data and 'cbuae' in website_config['name'].lower() and upload_to_cloud and results.get('upload', {}).get('total_successful', 0) > 0:
+            flattened_blob = flatten_cbuae_data()
             results['flattened'] = flattened_blob
         
         logger.info("[SUCCESS] Pipeline execution completed")

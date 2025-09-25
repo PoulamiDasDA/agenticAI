@@ -2,7 +2,7 @@ import re
 import json
 import logging
 import traceback
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from pathlib import Path
@@ -29,15 +29,15 @@ class CbuaeProcessor:
                                 storage_account, container_name: str):
         """
         Process a page immediately after it's scraped and uploaded.
-        Generates and uploads flattened JSON for the page.
+        Generates and uploads flattened JSON for the page to the processed container.
         
         Args:
-            page_data: The scraped page data
-            page_number: Page number for naming
+            page_data: The scraped page data (must include 'uuid' field)
+            page_number: Page number for logging
             date_folder: Date folder (e.g., "20241217")
             timestamp: Session timestamp (e.g., "20241217_143052")
             storage_account: StorageAccount instance
-            container_name: Container name for uploads
+            container_name: Container name for processed/flattened data uploads (should be processed container)
         """
         try:
             logger.info(f"[CBUAE-PROCESS] Starting immediate processing for page {page_number}")
@@ -50,13 +50,21 @@ class CbuaeProcessor:
                 logger.error(f"[CBUAE-PROCESS] Expected dict, got {type(page_data)}: {str(page_data)[:100]}...")
                 return
             
+            # Extract UUID from page data (should be set by SimpleScraper)
+            webpage_uuid = page_data.get('uuid')
+            if not webpage_uuid:
+                logger.error(f"[CBUAE-PROCESS] No UUID found in page_data for page {page_number}")
+                return
+            
+            # Extract website from page data or derive from URL
+            website = page_data.get('website', 'cbuae')  # Default to cbuae if not specified
+            
             # Generate flattened data
             flattened_records = self.flatten_single_page_data(page_data, str(page_number))
             
             if flattened_records:
-                # Create unique blob name with page number and URL hash to prevent collisions
-                url_hash = hash(page_data.get('url', '')) % 100000  # 5-digit hash
-                flattened_blob_name = f"{date_folder}/flattened/cbuae/page_{page_number}_{url_hash}_flattened_{timestamp}.json"
+                # Create blob name with new structure: YYYYMMDD/webpage/{website}/flattened_webpage_{uuid}.json
+                flattened_blob_name = f"{date_folder}/webpage/{website}/flattened_webpage_{webpage_uuid}.json"
                 
                 flattened_json = json.dumps(flattened_records, ensure_ascii=False, indent=2)
                 upload_result = storage_account.upload_text_content(
@@ -67,11 +75,11 @@ class CbuaeProcessor:
                 )
                 
                 if upload_result.get('status') == 'success':
-                    logger.info(f"[CBUAE-PROCESS] ✅ Immediately created flattened JSON for page {page_number}: {flattened_blob_name} ({len(flattened_records)} records)")
+                    logger.info(f"[CBUAE-PROCESS] ✅ Uploaded flattened data to processed container: {flattened_blob_name} ({len(flattened_records)} records, UUID: {webpage_uuid})")
                 else:
-                    logger.error(f"[CBUAE-PROCESS] ❌ Failed to upload flattened JSON for page {page_number}: {upload_result.get('error')}")
+                    logger.error(f"[CBUAE-PROCESS] ❌ Failed to upload flattened JSON for page {page_number} (UUID: {webpage_uuid}): {upload_result.get('error')}")
             else:
-                logger.info(f"[CBUAE-PROCESS] No flattened records generated for page {page_number}")
+                logger.info(f"[CBUAE-PROCESS] No flattened records generated for page {page_number} (UUID: {webpage_uuid})")
                 
         except Exception as e:
             logger.error(f"[CBUAE-PROCESS] Error in immediate processing for page {page_number}: {str(e)}")
@@ -449,12 +457,12 @@ class CbuaeProcessor:
                 'title': title,
                 'scraped_at': page_data.get('scraped_at', ''),
                 
-                # Extract regulation-specific fields
-                'circular_number': self._extract_circular_number(soup, title, url),
-                'effective_date': self._extract_effective_date(soup, content_html),
-                'regulation_section': self._extract_regulation_section(url, title),
-                'hierarchy': self._build_hierarchy_from_url(url, title),
-                'document_type': self._classify_document_type(title, url),
+                # Extract regulation-specific fields (with error handling for non-CBUAE content)
+                'circular_number': self._safe_extract_circular_number(soup, title, url),
+                'effective_date': self._safe_extract_effective_date(soup, content_html),
+                'regulation_section': self._safe_extract_regulation_section(url, title),
+                'hierarchy': self._safe_build_hierarchy_from_url(url, title),
+                'document_type': self._safe_classify_document_type(title, url),
                 
                 # Content fields - full content only
                 'content': content_html,  # Full content
@@ -613,8 +621,6 @@ class CbuaeProcessor:
 
     def _build_hierarchy_from_url(self, url: str, title: str) -> str:
         """Build hierarchy from URL structure"""
-        from urllib.parse import urlparse
-        
         # Ensure inputs are strings
         if isinstance(url, dict):
             url_text = url.get('url', '') or url.get('link', '') or str(url)
@@ -1119,3 +1125,44 @@ class CbuaeProcessor:
         except Exception as e:
             logger.error(f"[ERROR] Error in CBUAE single page processing: {e}")
             return document
+
+    # Safe wrapper methods for universal content processing
+    def _safe_extract_circular_number(self, soup, title: str, url: str) -> str:
+        """Safe wrapper for circular number extraction - returns empty string if fails"""
+        try:
+            return self._extract_circular_number(soup, title, url)
+        except Exception as e:
+            logger.debug(f"[SAFE EXTRACT] Circular number extraction failed (non-CBUAE content): {str(e)}")
+            return ""
+
+    def _safe_extract_effective_date(self, soup, content_html: str) -> str:
+        """Safe wrapper for effective date extraction - returns empty string if fails"""
+        try:
+            return self._extract_effective_date(soup, content_html)
+        except Exception as e:
+            logger.debug(f"[SAFE EXTRACT] Effective date extraction failed (non-CBUAE content): {str(e)}")
+            return ""
+
+    def _safe_extract_regulation_section(self, url: str, title: str) -> str:
+        """Safe wrapper for regulation section extraction - returns empty string if fails"""
+        try:
+            return self._extract_regulation_section(url, title)
+        except Exception as e:
+            logger.debug(f"[SAFE EXTRACT] Regulation section extraction failed (non-CBUAE content): {str(e)}")
+            return ""
+
+    def _safe_build_hierarchy_from_url(self, url: str, title: str) -> list:
+        """Safe wrapper for hierarchy building - returns empty list if fails"""
+        try:
+            return self._build_hierarchy_from_url(url, title)
+        except Exception as e:
+            logger.debug(f"[SAFE EXTRACT] Hierarchy building failed (non-CBUAE content): {str(e)}")
+            return []
+
+    def _safe_classify_document_type(self, title: str, url: str) -> str:
+        """Safe wrapper for document type classification - returns 'unknown' if fails"""
+        try:
+            return self._classify_document_type(title, url)
+        except Exception as e:
+            logger.debug(f"[SAFE EXTRACT] Document type classification failed (non-CBUAE content): {str(e)}")
+            return "unknown"

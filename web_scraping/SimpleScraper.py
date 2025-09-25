@@ -7,6 +7,7 @@ import json
 import re
 import os
 import logging
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ from unified_scraping_utils import (
 )
 
 class SimpleScraper:
-    def __init__(self, storage_account=None, container_name="scrapeddata", website="", timestamp="", download_files=False):
+    def __init__(self, storage_account=None, container_name=None, website="", timestamp=""):
         self.scraped_data = []
         self.http_utils = HttpUtils()
         self.html_utils = HtmlUtils()
@@ -26,17 +27,13 @@ class SimpleScraper:
         
         # For immediate upload functionality
         self.storage_account = storage_account
-        self.container_name = container_name
+        self.container_name = container_name or os.getenv('AZURE_STORAGE_RAW_CONTAINER_NAME', 'raw')
+        self.processed_container_name = os.getenv('AZURE_STORAGE_PROCESSED_CONTAINER_NAME', 'processed')
         self.website = website
         self.timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.date_folder = datetime.now().strftime('%Y%m%d')
+        self.date_folder = datetime.now().strftime('%Y%m%d')  # Keep YYYYMMDD format for container structure
         self.uploaded_pages = []
         self.upload_enabled = storage_account is not None
-        
-        # For immediate attachment download and upload
-        self.download_files = download_files
-        self.downloaded_files = set()
-        self.failed_downloads = set()
         
         # Unique page counter to prevent page number collisions
         self.page_counter = 0
@@ -79,11 +76,20 @@ class SimpleScraper:
             return False
             
         try:
-            # Create unique blob name with page number and URL hash to prevent collisions
-            url_hash = hash(page_data.get('url', '')) % 100000  # 5-digit hash
-            page_blob_name = f"{self.date_folder}/pages/{self.website}/page_{page_number}_{url_hash}.json"
+            # Generate UUID from URL hash for consistent naming
+            url_hash = hashlib.sha256(page_data.get('url', '').encode('utf-8')).hexdigest()[:8]
+            webpage_uuid = url_hash
             
-            page_json = json.dumps(page_data, indent=2, ensure_ascii=False)
+            # Create blob name with new structure: YYYYMMDD/webpage/{website}/webpage_{uuid}.json
+            page_blob_name = f"{self.date_folder}/webpage/{self.website}/webpage_{webpage_uuid}.json"
+            
+            # Add UUID and website metadata to page data
+            page_data_with_uuid = page_data.copy()
+            page_data_with_uuid['uuid'] = webpage_uuid
+            page_data_with_uuid['website'] = self.website
+            page_data_with_uuid['blob_path'] = page_blob_name
+            
+            page_json = json.dumps(page_data_with_uuid, indent=2, ensure_ascii=False)
             upload_result = self.storage_account.upload_text_content(
                 container_name=self.container_name,
                 blob_name=page_blob_name,
@@ -96,225 +102,58 @@ class SimpleScraper:
                     'blob_name': page_blob_name,
                     'url': page_data['url'][:100],
                     'content_size': len(str(page_data['content'])),
+                    'uuid': webpage_uuid,
                     'page_number': page_number
                 })
-                logger.info(f"[UPLOAD] Uploaded page {page_number}: {page_data['url'][:50]}...")
+                logger.info(f"[UPLOAD] Uploaded webpage {webpage_uuid}: {page_data['url'][:50]}...")
                 
                 # Trigger website-specific post-processing
-                self._post_process_page(page_data, page_number)
+                self._post_process_page(page_data_with_uuid, page_number)
                 
                 return True
             else:
-                logger.error(f"[UPLOAD] Failed to upload page {page_number}: {upload_result.get('error')}")
+                logger.error(f"[UPLOAD] Failed to upload webpage {webpage_uuid}: {upload_result.get('error')}")
                 return False
                 
         except Exception as e:
-            logger.error(f"[UPLOAD] Exception uploading page {page_number}: {str(e)}")
+            logger.error(f"[UPLOAD] Exception uploading webpage {webpage_uuid if 'webpage_uuid' in locals() else page_number}: {str(e)}")
             return False
 
     def _post_process_page(self, page_data, page_number):
-        """Hook for website-specific post-processing after page upload"""
-        if self.website == 'cbuae':
-            try:
-                logger.info(f"[POST-PROCESS] Calling CBUAE processor for page {page_number}, data type: {type(page_data)}")
-                from cbuae_processor import CbuaeProcessor
-                processor = CbuaeProcessor()
-                processor.process_page_immediately(
-                    page_data=page_data,
-                    page_number=page_number,
-                    date_folder=self.date_folder,
-                    timestamp=self.timestamp,
-                    storage_account=self.storage_account,
-                    container_name=self.container_name
-                )
-            except Exception as e:
-                logger.error(f"[POST-PROCESS] Error in CBUAE post-processing for page {page_number}: {str(e)}")
-                import traceback
-                traceback.print_exc()
-        # Add more website-specific processors here as needed
-
-    def _find_and_upload_attachments(self, soup, page_url, page_number):
-        """Find and immediately upload PDF and document attachments from a page"""
-        if not self.download_files:
-            return []
+        """Hook for post-processing after page upload - includes flattening for all websites"""
+        try:
+            logger.info(f"[POST-PROCESS] Starting post-processing for {self.website} page {page_number}, data type: {type(page_data)}")
+            logger.info(f"[POST-PROCESS] Page data keys: {list(page_data.keys()) if isinstance(page_data, dict) else 'Not a dict'}")
+            logger.info(f"[POST-PROCESS] URL: {page_data.get('url', 'No URL') if isinstance(page_data, dict) else 'No URL'}")
             
-        attachments_uploaded = []
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        
-        # Look for PDF and document links
-        attachment_selectors = [
-            'a[href$=".pdf"]',
-            'a[href$=".doc"]', 
-            'a[href$=".docx"]',
-            'a[href$=".xls"]',
-            'a[href$=".xlsx"]',
-            'a[href$=".ppt"]',
-            'a[href$=".pptx"]',
-            'a[href*=".pdf"]',  # PDFs with query parameters
-            'a[href*="download"]',  # Generic download links
-            'a[href*="attachment"]'  # Generic attachment links
-        ]
-        
-        for selector in attachment_selectors:
-            links = soup.select(selector)
-            for link in links:
-                href = link.get('href')
-                if not href:
-                    continue
-                    
-                # Convert relative URLs to absolute
-                attachment_url = urljoin(page_url, href)
-                
-                # Skip if already processed
-                if attachment_url in self.downloaded_files:
-                    continue
-                
-                try:
-                    # Download the attachment
-                    logger.info(f"[ATTACHMENT] Downloading: {attachment_url}")
-                    response = session.get(attachment_url, timeout=30)
-                    response.raise_for_status()
-                    
-                    # Get filename from URL or Content-Disposition header
-                    filename = self._get_filename_from_response(response, attachment_url)
-                    
-                    # Create blob name
-                    attachment_blob_name = f"{self.date_folder}/attachments/{self.website}/page_{page_number}_{filename}"
-                    
-                    # Upload binary content to Azure Storage
-                    upload_result = self.storage_account.upload_blob_content(
-                        container_name=self.container_name,
-                        blob_name=attachment_blob_name,
-                        content=response.content,
-                        content_type=response.headers.get('content-type', 'application/octet-stream')
-                    )
-                    
-                    if upload_result.get('status') == 'success':
-                        attachment_info = {
-                            'filename': filename,
-                            'url': attachment_url,
-                            'blob_name': attachment_blob_name,
-                            'size': len(response.content),
-                            'content_type': response.headers.get('content-type', 'unknown'),
-                            'page_number': page_number,
-                            'source_page': page_url
-                        }
-                        attachments_uploaded.append(attachment_info)
-                        self.downloaded_files.add(attachment_url)
-                        logger.info(f"[ATTACHMENT] ✅ Uploaded: {filename} ({attachment_info['size']} bytes)")
-                    else:
-                        logger.error(f"[ATTACHMENT] ❌ Upload failed: {filename} - {upload_result.get('error')}")
-                        self.failed_downloads.add(attachment_url)
-                        
-                except Exception as e:
-                    logger.error(f"[ATTACHMENT] ❌ Error downloading {attachment_url}: {str(e)}")
-                    self.failed_downloads.add(attachment_url)
-                    
-        return attachments_uploaded
-
-    def _get_filename_from_response(self, response, url):
-        """Extract filename from response headers or URL"""
-        # Try Content-Disposition header first
-        content_disposition = response.headers.get('content-disposition', '')
-        if 'filename=' in content_disposition:
-            filename = content_disposition.split('filename=')[1].strip('"\'')
-            return filename
+            # Always perform flattening for all websites (using CBUAE processor as generic processor)
+            from cbuae_processor import CbuaeProcessor
+            processor = CbuaeProcessor()
             
-        # Fall back to URL path
-        parsed_url = urlparse(url)
-        filename = os.path.basename(parsed_url.path)
-        
-        # If no extension, try to guess from content-type
-        if '.' not in filename:
-            content_type = response.headers.get('content-type', '').lower()
-            if 'pdf' in content_type:
-                filename += '.pdf'
-            elif 'word' in content_type or 'document' in content_type:
-                filename += '.docx'
-            elif 'excel' in content_type or 'spreadsheet' in content_type:
-                filename += '.xlsx'
-            elif 'powerpoint' in content_type or 'presentation' in content_type:
-                filename += '.pptx'
+            logger.info(f"[POST-PROCESS] Calling CbuaeProcessor.process_page_immediately for {self.website}")
+            processor.process_page_immediately(
+                page_data=page_data,
+                page_number=page_number,
+                date_folder=self.date_folder,
+                timestamp=self.timestamp,
+                storage_account=self.storage_account,
+                container_name=self.processed_container_name
+            )
+            
+            # Website-specific additional processing can be added here
+            if self.website == 'cbuae':
+                logger.info(f"[POST-PROCESS] CBUAE-specific processing completed for page {page_number}")
             else:
-                filename += '.bin'  # Generic binary file
+                logger.info(f"[POST-PROCESS] Generic flattening completed for {self.website} page {page_number}")
                 
-        # Sanitize filename
-        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-        return filename or f"attachment_{int(time.time())}.bin"
+        except Exception as e:
+            logger.error(f"[POST-PROCESS] Error in post-processing for {self.website} page {page_number}: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def _detect_site_type(self, base_url):
         """Auto-detect site type using unified utility"""
         return self.skeleton_discovery.detect_site_type(base_url)
-
-    def discover_site_skeleton(self, base_url, max_depth):
-        """Discover site structure without scraping full content - Legacy method"""
-        
-        logger.info(f"[DISCOVERY] Discovering site skeleton for: {base_url}")
-        logger.info(f"[DISCOVERY] Maximum depth: {max_depth} levels")
-        
-        discovered_urls = {}
-        visited = set()
-        to_visit = [(base_url, 0)]  # (url, depth)
-        
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        
-        while to_visit and len(visited) < 200:  # Limit total discovery
-            current_url, depth = to_visit.pop(0)
-            
-            if current_url in visited or depth > max_depth:
-                continue
-                
-            try:
-                logger.info(f"[DISCOVERY] Level {depth}: {current_url}")
-                response = session.get(current_url, timeout=15)
-                response.raise_for_status()
-                
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # Extract basic page info
-                page_info = {
-                    'url': current_url,
-                    'title': soup.title.get_text().strip() if soup.title else '',
-                    'depth': depth,
-                    'links_found': 0,
-                    'estimated_content_length': len(soup.get_text()),
-                    'has_tables': len(soup.find_all('table')) > 0,
-                    'has_forms': len(soup.find_all('form')) > 0,
-                    'discovered_at': datetime.now().isoformat()
-                }
-                
-                # Find all links
-                links = soup.find_all('a', href=True)
-                page_info['links_found'] = len(links)
-                
-                # Categorize and add new URLs to visit
-                for link in links:
-                    href = urljoin(current_url, link.get('href'))
-                    
-                    if not self.is_valid_discovery_link(href, base_url):
-                        continue
-                    
-                    if href not in visited and depth < max_depth:
-                        to_visit.append((href, depth + 1))
-                
-                discovered_urls[current_url] = page_info
-                visited.add(current_url)
-                
-            except Exception as e:
-                logger.error(f"[ERROR] Error discovering {current_url}: {e}")
-                visited.add(current_url)
-                continue
-        
-        logger.info(f"[SUCCESS] Discovery completed!")
-        logger.info(f"[RESULTS] Total URLs discovered: {len(discovered_urls)}")
-        
-        return discovered_urls
 
     def discover_site_skeleton_hierarchical(self, base_url, max_depth=2, site_type="auto"):
         """
@@ -344,22 +183,7 @@ class SimpleScraper:
         else:
             return self._discover_generic_skeleton(base_url, max_depth)
 
-    def _detect_site_type(self, base_url):
-        """Auto-detect the type of website"""
-        specialized_patterns = [
-            "centralbank.ae",
-            "rulebook.",
-            "regulations.",
-            "legal.",
-            "compliance.",
-            "policy.",
-            "directive"
-        ]
-        
-        for pattern in specialized_patterns:
-            if pattern in base_url.lower():
-                return "specialized"
-        return "generic"
+
 
     def _create_standard_item(self, title, link, base_url, site_type="generic"):
         """Create standardized item structure for both site types"""
@@ -386,8 +210,14 @@ class SimpleScraper:
         try:
             logger.info('Inside _discover_specialized_skeleton')
             response = self.get_response(base_url)
+            if not response:
+                logger.error(f"[ERROR] Failed to get response from {base_url}")
+                return {'total_discovered': 0, 'main_sections': [], 'hierarchical_structure': {}}
+                
             soup = self.get_soup(response)
-            
+            if not soup:
+                logger.error(f"[ERROR] Failed to parse HTML from {base_url}")
+                return {'total_discovered': 0, 'main_sections': [], 'hierarchical_structure': {}}
 
             # For CBUAE website, look for the specific navigation structure
             main_sections = []
@@ -857,14 +687,6 @@ class SimpleScraper:
                     'depth': depth,  # Depth where filtered URLs = 0
                     'scraped_at': datetime.now().isoformat()
                 }
-                
-                # Process attachments immediately if enabled
-                attachments_uploaded = []
-                if self.download_files:
-                    attachments_uploaded = self._find_and_upload_attachments(soup, url, len(visited) + 1)
-                    if attachments_uploaded:
-                        logger.info(f"[ATTACHMENT] Found and uploaded {len(attachments_uploaded)} attachments from {url}")
-                        data['attachments'] = attachments_uploaded  # Add to page data
                 
                 # Upload immediately if storage is configured
                 self.page_counter += 1  # Increment unique page counter

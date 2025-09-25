@@ -7,6 +7,14 @@ from dotenv import load_dotenv
 from typing import List
 import logging
 
+# Azure Storage imports
+try:
+    from azure.storage.blob import BlobServiceClient, ContentSettings
+    from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
+    AZURE_IMPORTS_AVAILABLE = True
+except ImportError:
+    AZURE_IMPORTS_AVAILABLE = False
+
 # Load environment variables
 load_dotenv()
 
@@ -40,8 +48,6 @@ class StorageAccount:
         # Check if using Azurite for local development
         if self.storage_account_name == 'devstoreaccount1':
             try:
-                from azure.storage.blob import BlobServiceClient
-                
                 # Azurite connection string
                 azurite_connection_string = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
                 
@@ -65,9 +71,6 @@ class StorageAccount:
         if self.credential_type == 'AAD':
             # Method 1: Try DefaultAzureCredential (works for development and CI/CD)
             try:
-                from azure.identity import DefaultAzureCredential
-                from azure.storage.blob import BlobServiceClient
-                
                 credential = DefaultAzureCredential()
                 self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
                 
@@ -85,9 +88,6 @@ class StorageAccount:
         elif self.credential_type == 'managedidentity':
             # Method 4: Try ManagedIdentityCredential for Azure Functions
             try:
-                from azure.identity import ManagedIdentityCredential
-                from azure.storage.blob import BlobServiceClient
-                
                 # For system-assigned managed identity, don't pass client_id
                 # For user-assigned managed identity, pass client_id
                 client_id = os.getenv('AZURE_CLIENT_ID') or os.getenv('AzureWebJobsStorage__clientId')
@@ -114,9 +114,6 @@ class StorageAccount:
                 self.logger.warning(f"Managed Identity auth failed: {e}")
                 # Fallback to DefaultAzureCredential
                 try:
-                    from azure.identity import DefaultAzureCredential
-                    from azure.storage.blob import BlobServiceClient
-                    
                     credential = DefaultAzureCredential()
                     self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
                     
@@ -134,6 +131,21 @@ class StorageAccount:
         # If all methods fail
         self.azure_available = False
         self.logger.warning("All Azure authentication methods failed - using local mode")
+    
+    def _ensure_container_exists(self, container_name):
+        """Helper method to ensure container exists"""
+        if not self.azure_available:
+            return False
+        
+        try:
+            container_client = self.blob_service_client.get_container_client(container_name)
+            if not container_client.exists():
+                container_client.create_container()
+                self.logger.info(f"Created container: {container_name}")
+            return True
+        except Exception as e:
+            self.logger.warning(f"Container creation/check failed for {container_name}: {e}")
+            return True  # Container might already exist, which is fine
     
     
     def upload_file(self, local_file_path, blob_name=None, overwrite=True, metadata=None):
@@ -173,7 +185,7 @@ class StorageAccount:
             self.logger.error(f"Azure upload failed for {local_file_path}: {e}")
             return f"file://{local_file_path}"
     
-    def upload_scraped_data(self, individual_dir, summary_file=None, blob_prefix="central_bank_uae"):
+    def upload_scraped_data(self, individual_dir, blob_prefix="central_bank_uae"):
         """Upload scraped data with guaranteed return structure"""
         try:
             # Count files first
@@ -211,23 +223,6 @@ class StorageAccount:
                     })
                     self.logger.error(f"Failed to process {file_path}: {e}")
             
-            # Handle summary file
-            summary_results = {'successful_uploads': [], 'failed_uploads': []}
-            if summary_file and os.path.exists(summary_file):
-                try:
-                    summary_blob_name = f"{session_prefix}/summary/{os.path.basename(summary_file)}"
-                    summary_url = self.upload_file(summary_file, summary_blob_name)
-                    summary_results['successful_uploads'].append({
-                        'local_path': summary_file,
-                        'blob_name': summary_blob_name,
-                        'blob_url': summary_url
-                    })
-                except Exception as e:
-                    summary_results['failed_uploads'].append({
-                        'local_path': summary_file,
-                        'error': str(e)
-                    })
-            
             # Return guaranteed structure
             return {
                 'session_prefix': session_prefix,
@@ -237,9 +232,8 @@ class StorageAccount:
                     'total_files': len(json_files),
                     'total_size_mb': total_size
                 },
-                'summary_files': summary_results,
-                'total_successful': len(successful_uploads) + len(summary_results['successful_uploads']),
-                'total_failed': len(failed_uploads) + len(summary_results['failed_uploads']),
+                'total_successful': len(successful_uploads),
+                'total_failed': len(failed_uploads),
                 'total_size_mb': total_size,
                 'azure_available': self.azure_available,
                 'status': 'uploaded' if self.azure_available else 'local_tracking'
@@ -250,7 +244,6 @@ class StorageAccount:
             return {
                 'session_prefix': f"failed/{blob_prefix}",
                 'individual_files': {'successful_uploads': [], 'failed_uploads': [], 'total_files': 0, 'total_size_mb': 0},
-                'summary_files': {'successful_uploads': [], 'failed_uploads': []},
                 'total_successful': 0,
                 'total_failed': 1,
                 'total_size_mb': 0,
@@ -314,8 +307,6 @@ class StorageAccount:
             return []
     
     # Backward compatibility methods
-    def upload_directory(self, *args, **kwargs):
-        return {'successful_uploads': [], 'failed_uploads': [], 'total_files': 0, 'total_size_mb': 0}
     
     def upload_text_content(self, container_name, blob_name, content, content_type="text/plain", overwrite=True):
         """Upload text content to Azure Storage"""
@@ -323,17 +314,8 @@ class StorageAccount:
             return {'status': 'failed', 'error': 'Azure Storage not available', 'blob_url': f"local://{blob_name}"}
         
         try:
-            from azure.storage.blob import ContentSettings
-            
-            # Ensure the configured container exists (not create new ones)
-            container_client = self.blob_service_client.get_container_client(container_name)
-            try:
-                if not container_client.exists():
-                    container_client.create_container()
-                    self.logger.info(f"Created container: {container_name}")
-            except Exception:
-                # Container might already exist, which is fine
-                pass
+            # Ensure the configured container exists
+            self._ensure_container_exists(container_name)
             
             blob_client = self.blob_service_client.get_blob_client(
                 container=container_name,
@@ -359,17 +341,8 @@ class StorageAccount:
             return {'status': 'failed', 'error': 'Azure Storage not available', 'blob_url': f"local://{blob_name}"}
         
         try:
-            from azure.storage.blob import ContentSettings
-            
-            # Ensure the configured container exists (not create new ones)
-            container_client = self.blob_service_client.get_container_client(container_name)
-            try:
-                if not container_client.exists():
-                    container_client.create_container()
-                    self.logger.info(f"Created container: {container_name}")
-            except Exception:
-                # Container might already exist, which is fine
-                pass
+            # Ensure the configured container exists
+            self._ensure_container_exists(container_name)
             
             blob_client = self.blob_service_client.get_blob_client(
                 container=container_name,
@@ -389,21 +362,7 @@ class StorageAccount:
             self.logger.error(f"Error uploading blob content: {e}")
             return {'status': 'failed', 'error': str(e), 'blob_url': f"local://{blob_name}"}
 
-    def upload_blob_content_legacy(self, blob_name, content, overwrite=True, metadata=None):
-        """Legacy method for backward compatibility"""
-        if not self.azure_available:
-            return f"local://{blob_name}"
-        
-        try:
-            blob_client = self.blob_service_client.get_blob_client(
-                container=self.container_name,
-                blob=blob_name
-            )
-            blob_client.upload_blob(content.encode('utf-8'), overwrite=overwrite, metadata=metadata)
-            return blob_client.url
-        except Exception as e:
-            self.logger.error(f"Error uploading content: {e}")
-            return f"local://{blob_name}"
+
     
     def download_blob_content(self, blob_name):
         if not self.azure_available:
@@ -420,8 +379,7 @@ class StorageAccount:
             self.logger.error(f"Error downloading blob: {e}")
             return "{}"
     
-    def process_with_blob_storage(self, *args, **kwargs):
-        return f"local://processed"
+
     
     def upload_to_latest(self, blob_prefix, filename, content, overwrite=True):
         """
