@@ -118,4 +118,28 @@ Container: processed/
 
 ---
 
+# Azure Durable Functions Web Scraping API Documentation
+
+## Overview
+This Azure Function App provides a comprehensive web scraping service using Durable Functions architecture with orchestrator, activity, HTTP trigger, and timer functions.
+
+## 🔐 Managed Identity Access Requirements
+
+When deploying the Function App, the following access levels were assigned to the managed identity:
+
+### Azure Storage Account
+- **Storage Blob Data Contributor**: Read, write, and delete blob data
+- **Storage Queue Data Contributor**: Manage queue messages for durable functions
+- **Storage Table Data Contributor**: Access table storage for workflow state
+- **Storage Account Contributor**: Manage storage account properties
+
+### Application Insights
+- **Monitoring Metrics Publisher**: Publish custom metrics and telemetry
+- **Application Insights Component Contributor**: Access to insights data
+
+### Key Vault (if used)
+- **Key Vault Secrets User**: Read secrets for configuration
+
+
+
 **Need Help?** Check `API_REFERENCE.md` for complete documentation and examples.
