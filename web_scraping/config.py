@@ -121,8 +121,8 @@ PROCESSING_CONFIG = {
     'default_mode': os.getenv('SCRAPING_MODE', 'full'),
     'default_website': os.getenv('DEFAULT_WEBSITE_KEY', None),  # Which website to use by default
     'upload_to_cloud': os.getenv('UPLOAD_TO_CLOUD', 'true').lower() == 'true',
-    'flatten_data': os.getenv('FLATTEN_DATA', 'true').lower() == 'true',
     'timer_enabled': os.getenv('TIMER_ENABLED', 'false').lower() == 'true'
+    # Note: flattening now happens automatically during scraping via immediate upload
 }
 
 # ==============================================================================
@@ -235,7 +235,7 @@ def print_config_summary(logger=None):
     # Processing Configuration
     logger.info("Default Mode: %s", PROCESSING_CONFIG['default_mode'])
     logger.info("Upload to Cloud: %s", PROCESSING_CONFIG['upload_to_cloud'])
-    logger.info("Flatten Data: %s", PROCESSING_CONFIG['flatten_data'])
+    logger.info("Flattening: Automatic during scraping (immediate upload)")
     
     # Health Check Configuration
     logger.info("Health Check: %s:%s", HEALTH_CONFIG['host'], HEALTH_CONFIG['port'])

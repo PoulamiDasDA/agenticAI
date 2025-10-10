@@ -7,11 +7,6 @@ import os
 import sys
 from datetime import datetime
 from typing import Dict, Any
-import requests
-from bs4 import BeautifulSoup
-import time
-from urllib.parse import urljoin, urlparse
-import hashlib
 
 # Set UTF-8 encoding for Windows
 if sys.platform.startswith('win'):
@@ -22,9 +17,11 @@ from config import (
     setup_logging,
     FUNCTIONS_CONFIG,
     STORAGE_CONFIG,
-    get_website_config
+    get_website_config,
+    get_websites_config,
+    list_available_websites
 )
-from main import get_storage_account, extract_urls_from_structure, process_website_config
+from main import get_storage_account, extract_urls_from_structure
 from SimpleScraper import SimpleScraper
 
 # Setup logging using configuration
@@ -194,81 +191,6 @@ def scraping_orchestrator(context: df.DurableOrchestrationContext):
             'error': str(e),
             'failed_at': context.current_utc_datetime.isoformat()
         }
-
-@app.activity_trigger(input_name="input_data")
-def load_discovery_results(input_data):
-    """
-    Load discovery results from Azure Storage for the scraping phase
-    """
-    website = input_data.get('website')
-    if not website:
-        logger.error(f"[LOAD DISCOVERY] No website specified in input_data: {input_data}")
-        raise ValueError("Website parameter is required")
-    
-    logger.info(f"[LOAD DISCOVERY] Loading discovery results for {website}")
-    logger.info(f"[LOAD DISCOVERY] Input data: {input_data}")
-    
-    try:
-        # Get storage account
-        storage_account = get_storage_account()
-        
-        container_name = os.getenv('AZURE_STORAGE_RAW_CONTAINER_NAME', 'raw')
-        container_client = storage_account.blob_service_client.get_container_client(container_name)
-        
-        # Create blob path for discovery results
-        date_str = datetime.now().strftime('%Y%m%d')
-        blob_path = f"{date_str}/discovery/{website}/discovery_results.json"
-        
-        # Try to download the discovery results
-        blob_client = container_client.get_blob_client(blob_path)
-        
-        if blob_client.exists():
-            blob_data = blob_client.download_blob().readall()
-            discovery_data = json.loads(blob_data.decode('utf-8'))
-            
-            logger.info(f"[LOAD DISCOVERY] Successfully loaded discovery results for {website}")
-            logger.info(f"[LOAD DISCOVERY] Found {len(discovery_data.get('discovered_urls', {}))} discovered URLs")
-            
-            return {
-                "status": "success",
-                "website": website,
-                "discovery_data": discovery_data,
-                "blob_path": blob_path,
-                "loaded_at": datetime.utcnow().isoformat()
-            }
-        else:
-            logger.error(f"[LOAD DISCOVERY] No discovery results found at {blob_path}")
-            return {
-                "status": "error",
-                "message": f"No discovery results found for {website}. Please run discovery first.",
-                "expected_path": blob_path
-            }
-            
-    except Exception as e:
-        logger.error(f"[LOAD DISCOVERY] Error loading discovery results: {e}")
-        return {
-            "status": "error",
-            "message": f"Error loading discovery results: {str(e)}",
-            "website": website
-        }
-
-# ==============================================================================
-# HELPER FUNCTIONS
-# ==============================================================================
-
-def load_stored_discovery_data(discovery_filepath: str) -> Dict[str, Any]:
-    """
-    Load full discovery data from stored file
-    """
-    try:
-        import json
-        with open(discovery_filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load discovery data from {discovery_filepath}: {str(e)}")
-        return {}
-
-
 
 # ==============================================================================
 # CONFIGURATION HELPERS
@@ -799,6 +721,170 @@ async def http_batch_scraper(req: func.HttpRequest, client: df.DurableOrchestrat
             mimetype="application/json"
         )
 
+# ==============================================================================
+# MULTI-WEBSITE ORCHESTRATOR (mirrors main.py logic)
+# ==============================================================================
+
+@app.orchestration_trigger(context_name="context")
+def multi_website_orchestrator(context: df.DurableOrchestrationContext):
+    """
+    NEW: Multi-website orchestrator that mirrors the updated main.py logic
+    Processes ALL websites with comprehensive error handling and reporting
+    """
+    input_data = context.get_input()
+    websites = input_data.get('websites', [])
+    mode = input_data.get('mode', 'full')
+    upload_to_cloud = input_data.get('upload_to_cloud', True)
+    flatten_data = input_data.get('flatten_data', False)
+    max_files = input_data.get('max_files', 100)
+    
+    if not websites:
+        return {"error": "No websites provided", "status": "failed"}
+    
+    if not context.is_replaying:
+        logger.info(f"[MULTI-ORCHESTRATOR] Starting multi-website processing for {len(websites)} websites")
+    
+    try:
+        all_results = {}
+        
+        # Process each website sequentially (like main.py)
+        for i, website_key in enumerate(websites, 1):
+            if not context.is_replaying:
+                logger.info(f"[MULTI-ORCHESTRATOR {i}/{len(websites)}] Processing: {website_key}")
+            
+            try:
+                # Call the existing single-website orchestrator
+                website_result = yield context.call_sub_orchestrator(
+                    "scraping_orchestrator",
+                    {
+                        "website": website_key,
+                        "mode": mode,
+                        "upload_to_cloud": upload_to_cloud,
+                        "max_files": max_files
+                    }
+                )
+                
+                all_results[website_key] = {
+                    'status': 'success',
+                    'results': website_result
+                }
+                
+                if not context.is_replaying:
+                    logger.info(f"[MULTI-ORCHESTRATOR {i}/{len(websites)}] SUCCESS: {website_key}")
+                
+            except Exception as e:
+                if not context.is_replaying:
+                    logger.error(f"[MULTI-ORCHESTRATOR {i}/{len(websites)}] ERROR {website_key}: {e}")
+                
+                all_results[website_key] = {
+                    'status': 'error',
+                    'error': str(e),
+                    'results': None
+                }
+        
+        # Calculate summary (like main.py)
+        successful = sum(1 for result in all_results.values() if result['status'] == 'success')
+        failed = len(all_results) - successful
+        
+        final_result = {
+            'status': 'completed',
+            'websites_processed': len(websites),
+            'successful': successful,
+            'failed': failed,
+            'results': all_results,
+            'summary': {
+                'total_websites': len(websites),
+                'success_rate': f"{(successful/len(websites)*100):.1f}%",
+                'failed_websites': [key for key, result in all_results.items() if result['status'] == 'error']
+            },
+            'completed_at': context.current_utc_datetime.isoformat()
+        }
+        
+        if not context.is_replaying:
+            logger.info(f"[MULTI-ORCHESTRATOR COMPLETE] Processed {len(websites)} websites: {successful} successful, {failed} failed")
+        
+        return final_result
+        
+    except Exception as e:
+        if not context.is_replaying:
+            logger.error(f"[MULTI-ORCHESTRATOR ERROR] Multi-website processing failed: {e}")
+        
+        return {
+            'status': 'failed',
+            'error': str(e),
+            'websites_requested': websites,
+            'failed_at': context.current_utc_datetime.isoformat()
+        }
+
+@app.route(route="scrape-all-websites", methods=["POST"])
+@app.durable_client_input(client_name="client")
+async def http_scrape_all_websites(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+    """
+    NEW: Process ALL websites using main.py logic in Durable Functions
+    POST /api/scrape-all-websites
+    Body: {
+        "mode": "full",  # Optional: processing mode
+        "upload_to_cloud": true,  # Optional: upload results
+        "flatten_data": true,  # Optional: flatten CBUAE data
+        "max_files": 100  # Optional: max files per website
+    }
+    """
+    try:
+        body = req.get_json() if req.get_body() else {}
+        
+        # Use same defaults as main.py
+        from config import PROCESSING_CONFIG
+        mode = body.get("mode", PROCESSING_CONFIG['default_mode'])
+        upload_to_cloud = body.get("upload_to_cloud", PROCESSING_CONFIG['upload_to_cloud'])
+        flatten_data = body.get("flatten_data", PROCESSING_CONFIG['flatten_data'])
+        max_files = body.get("max_files", FUNCTIONS_CONFIG['default_max_files'])
+        
+        # Get ALL websites like main.py does
+        websites = get_websites_config()
+        
+        if not websites:
+            return func.HttpResponse(
+                json.dumps({"error": "No websites configured"}), 
+                status_code=400, 
+                mimetype="application/json"
+            )
+        
+        # Start orchestrator for multi-website processing
+        instance_id = await client.start_new("multi_website_orchestrator", client_input={
+            "websites": [w['key'] for w in websites],
+            "mode": mode,
+            "upload_to_cloud": upload_to_cloud,
+            "flatten_data": flatten_data,
+            "max_files": max_files
+        })
+        
+        logger.info(f"[SCRAPE ALL] Started multi-website orchestrator {instance_id} for {len(websites)} websites")
+        
+        return func.HttpResponse(
+            json.dumps({
+                "instanceId": instance_id,
+                "statusQueryGetUri": f"/api/scraper/status/{instance_id}",
+                "websites_count": len(websites),
+                "websites": [{"key": w['key'], "name": w['name']} for w in websites],
+                "configuration": {
+                    "mode": mode,
+                    "upload_to_cloud": upload_to_cloud,
+                    "flatten_data": flatten_data,
+                    "max_files": max_files
+                }
+            }), 
+            status_code=202, 
+            mimetype="application/json"
+        )
+        
+    except Exception as e:
+        logger.error(f"[SCRAPE ALL ERROR] {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}), 
+            status_code=500, 
+            mimetype="application/json"
+        )
+
 @app.route(route="health", methods=["GET"])
 def http_health_check(req: func.HttpRequest) -> func.HttpResponse:
     # Get website configuration status
@@ -874,29 +960,45 @@ async def timer_start_scraper(mytimer: func.TimerRequest, client: df.DurableOrch
         
         logger.info(f'[TIMER] Starting scraping for {len(available_websites)} websites: {", ".join(available_websites)}')
         
-        # Start individual workflows for each website
-        started_instances = []
-        for website in available_websites:
-            try:
-                instance_id = await client.start_new("scraping_orchestrator", client_input={
-                    "website": website, 
-                    "mode": 'complete', 
-                    "upload_to_cloud": os.getenv('UPLOAD_TO_CLOUD'),
-                    "max_files": max_files
-                })
-                
-                started_instances.append({
-                    'website': website,
-                    'instance_id': instance_id
-                })
-                
-                logger.info(f'[TIMER] ✅ Started workflow {instance_id} for {website}')
-                
-            except Exception as website_error:
-                logger.error(f'[TIMER] ❌ Failed to start workflow for {website}: {str(website_error)}')
-                continue
-        
-        logger.info(f'[TIMER SUCCESS] Started {len(started_instances)} workflows out of {len(available_websites)} websites')
+        # Use the new multi-website orchestrator for better coordination
+        try:
+            instance_id = await client.start_new("multi_website_orchestrator", client_input={
+                "websites": available_websites,
+                "mode": 'complete', 
+                "upload_to_cloud": os.getenv('UPLOAD_TO_CLOUD', 'true').lower() == 'true',
+                "flatten_data": True,  # Enable data flattening for timer runs
+                "max_files": max_files
+            })
+            
+            logger.info(f'[TIMER SUCCESS] Started multi-website orchestrator {instance_id} for {len(available_websites)} websites: {", ".join(available_websites)}')
+            
+        except Exception as orchestrator_error:
+            logger.error(f'[TIMER ERROR] Failed to start multi-website orchestrator: {str(orchestrator_error)}')
+            
+            # Fallback: start individual workflows if multi-orchestrator fails
+            logger.info('[TIMER FALLBACK] Starting individual workflows as fallback')
+            started_instances = []
+            for website in available_websites:
+                try:
+                    instance_id = await client.start_new("scraping_orchestrator", client_input={
+                        "website": website, 
+                        "mode": 'complete', 
+                        "upload_to_cloud": os.getenv('UPLOAD_TO_CLOUD'),
+                        "max_files": max_files
+                    })
+                    
+                    started_instances.append({
+                        'website': website,
+                        'instance_id': instance_id
+                    })
+                    
+                    logger.info(f'[TIMER FALLBACK] ✅ Started individual workflow {instance_id} for {website}')
+                    
+                except Exception as website_error:
+                    logger.error(f'[TIMER FALLBACK] ❌ Failed to start workflow for {website}: {str(website_error)}')
+                    continue
+            
+            logger.info(f'[TIMER FALLBACK] Started {len(started_instances)} individual workflows out of {len(available_websites)} websites')
     except Exception as e:
         logger.error(f'[TIMER ERROR] {str(e)}')
         raise

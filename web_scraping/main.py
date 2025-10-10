@@ -105,8 +105,29 @@ def process_website_config(website_config, processing_mode='full'):
     logger.info(f"[PROCESSING] Max depth: {max_depth}")
     logger.info(f"[PROCESSING] Filters: {filters}")
     
-    # Initialize components (simplified - no site type distinction)
-    scraper = SimpleScraper()
+    # Initialize components with immediate Azure Storage upload capability
+    # Get storage account for immediate uploads
+    storage_account = StorageAccount()  # Uses DefaultAzureCredential (real Azure Storage)
+    
+    # Get container names from environment
+    raw_container = os.getenv('AZURE_STORAGE_RAW_CONTAINER_NAME', 'raw')
+    
+    # Log storage configuration
+    logger.info(f"[STORAGE] Container for uploads: {raw_container}")
+    logger.info(f"[STORAGE] Immediate upload enabled: True")
+    
+    # Initialize scraper with immediate upload capability
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    website_key = website_config.get('key', website_name.lower().replace(' ', '_'))
+    
+    logger.info(f"[SCRAPER] Initializing with immediate upload for website: {website_key}")
+    
+    scraper = SimpleScraper(
+        storage_account=storage_account,
+        container_name=raw_container,
+        website=website_key,
+        timestamp=timestamp
+    )
     processor = create_processor("generic", website_name.lower().replace(' ', '_'))
     
     results = {}
@@ -372,75 +393,9 @@ def upload_to_azure(results, website_key=None):
             'error': str(e)
         }
 
-# Cell 5: CBUAE Data Flattening - Using existing storage
-def flatten_cbuae_data():
-    """Apply CBUAE-specific data flattening using your existing storage"""
-    
-    # Get website configuration from environment
-    website_config = get_website_config()
-    
-    if 'cbuae' not in website_config['name'].lower():
-        logger.warning("[WARNING] Data flattening only available for CBUAE")
-        return None
-    
-    try:
-        # Initialize CBUAE processor and use existing storage
-        processor = create_processor('specialized', 'cbuae')
-        storage = get_storage_account()
-        
-        logger.info("[FLATTENING] Starting CBUAE data flattening...")
-        logger.info(f"[FLATTENING] Using storage: {STORAGE_CONFIG['account_name']}")
-        
-        if not storage.azure_available:
-            logger.warning("[WARNING] Azure Storage not available for flattening")
-            return None
-        
-        # List recent blobs to find the latest processed data
-        blobs = storage.list_blobs(prefix="central_bank_uae/session_")
-        
-        if not blobs:
-            logger.error("[ERROR] No processed data found in storage")
-            logger.info("[INFO] Try running the pipeline with upload_to_cloud=True first")
-            return None
-        
-        # Use the most recent session
-        latest_blob = sorted(blobs, key=lambda x: x['last_modified'], reverse=True)[0]
-        input_blob = latest_blob['name']
-        
-        logger.info(f"[FLATTENING] Using input blob: {input_blob}")
-        
-        # Check if the processor supports flattening
-        if hasattr(processor, 'site_processor') and hasattr(processor.site_processor, 'flatten_cbuae_data_from_blob'):
-            # Flatten the data - FIXED: use storage_account parameter
-            output_blob = processor.site_processor.flatten_cbuae_data_from_blob(
-                input_blob=input_blob,
-                output_prefix="central_bank_uae/flattened",
-                output_filename="cbuae_flattened_data.json",
-                storage_account=storage  # Fixed parameter name
-            )
-            
-            if output_blob and not output_blob.startswith('local://'):
-                logger.info(f"[SUCCESS] Data flattening completed: {output_blob}")
-                return output_blob
-            elif output_blob:
-                logger.warning(f"[WARNING] Data flattening completed locally: {output_blob}")
-                return output_blob
-            else:
-                logger.error("[ERROR] Data flattening failed")
-                return None
-        else:
-            logger.error("[ERROR] CBUAE processor does not support flattening")
-            return None
-            
-    except Exception as e:
-        logger.error(f"[ERROR] Flattening failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-# Cell 6: Main Execution
+# Cell 5: Main Execution
 def main():
-    """Main execution function with container support"""
+    """Main execution function with container support - processes ALL websites"""
     
     logger.info("[STARTUP] Web Scraping Pipeline Started")
     
@@ -449,30 +404,73 @@ def main():
     
     # Use configuration from config.py
     mode = PROCESSING_CONFIG['default_mode']
-    default_website_key = PROCESSING_CONFIG['default_website']
     upload_to_cloud = PROCESSING_CONFIG['upload_to_cloud']
-    flatten_data = PROCESSING_CONFIG['flatten_data']
+    # Note: flattening now happens automatically during scraping via immediate upload
     
     # Print comprehensive configuration summary
     print_config_summary(logger)
     
+    # Get ALL websites from configuration
+    from config import get_websites_config, list_available_websites
+    
     try:
-        # Step 1: Process the website
-        results = process_website(mode, default_website_key)
+        websites = get_websites_config()
+        available_keys = list_available_websites()
         
-        # Step 2: Upload to your existing Azure Storage (optional)
-        if upload_to_cloud and 'processing' in results:
-            upload_results = upload_to_azure(results, default_website_key)
-            results['upload'] = upload_results
+        logger.info(f"[MULTI-WEBSITE] Found {len(websites)} websites to process:")
+        for website in websites:
+            logger.info(f"[MULTI-WEBSITE]   - {website['key']}: {website['name']}")
         
-        # Step 3: Flatten data for CBUAE using existing storage (optional)
-        website_config = get_website_config(default_website_key)
-        if flatten_data and 'cbuae' in website_config['name'].lower() and upload_to_cloud and results.get('upload', {}).get('total_successful', 0) > 0:
-            flattened_blob = flatten_cbuae_data()
-            results['flattened'] = flattened_blob
+        all_results = {}
         
-        logger.info("[SUCCESS] Pipeline execution completed")
-        return results
+        # Process each website
+        for i, website in enumerate(websites, 1):
+            website_key = website['key']
+            website_name = website['name']
+            
+            logger.info(f"[PROCESSING {i}/{len(websites)}] Starting website: {website_key} - {website_name}")
+            
+            try:
+                # Step 1: Process the website
+                results = process_website(mode, website_key)
+                
+                # Step 2: Upload to your existing Azure Storage (optional)
+                if upload_to_cloud and 'processing' in results:
+                    upload_results = upload_to_azure(results, website_key)
+                    results['upload'] = upload_results
+                
+                # Note: Flattening happens automatically during scraping via immediate upload
+                
+                all_results[website_key] = {
+                    'status': 'success',
+                    'results': results
+                }
+                
+                logger.info(f"[SUCCESS {i}/{len(websites)}] Completed website: {website_key}")
+                
+            except Exception as e:
+                logger.error(f"[ERROR {i}/{len(websites)}] Failed website {website_key}: {e}")
+                all_results[website_key] = {
+                    'status': 'error',
+                    'error': str(e),
+                    'results': None
+                }
+                continue  # Continue with next website
+        
+        # Summary
+        successful = sum(1 for result in all_results.values() if result['status'] == 'success')
+        failed = len(all_results) - successful
+        
+        logger.info(f"[PIPELINE SUMMARY] Processed {len(websites)} websites:")
+        logger.info(f"[PIPELINE SUMMARY]   Successful: {successful}")
+        logger.info(f"[PIPELINE SUMMARY]   Failed: {failed}")
+        
+        if failed > 0:
+            failed_keys = [key for key, result in all_results.items() if result['status'] == 'error']
+            logger.warning(f"[PIPELINE SUMMARY]   Failed websites: {failed_keys}")
+        
+        logger.info("[SUCCESS] Multi-website pipeline execution completed")
+        return all_results
         
     except Exception as e:
         logger.error(f"[ERROR] Pipeline failed: {e}")
